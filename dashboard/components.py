@@ -31,8 +31,10 @@ class ComponentFormatter:
         for r in robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
             pos_str = f"({r.position[0]}, {r.position[1]})"
-            raw_status = (r.availability_state if r.availability_state not in {"", "UNKNOWN"}
-                          else r.status).upper()
+            availability = (r.availability_state or "UNKNOWN").upper()
+            raw_status = (r.status or "UNKNOWN").upper()
+            critical_states = {"DISCHARGED", "OFFLINE", "GOING_TO_CHARGER", "CHARGING", "LOW_BATTERY"}
+            raw_status = availability if availability in critical_states else raw_status
             is_conflicted = str(r.robot_id) in conflicted_robots
 
             if is_conflicted:

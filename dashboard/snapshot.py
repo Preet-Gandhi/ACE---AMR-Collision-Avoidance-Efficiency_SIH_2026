@@ -11,6 +11,7 @@ class RobotView:
     position: Tuple[int, int]
     status: str = "UNKNOWN"
     battery: Optional[float] = None
+    battery_percentage: Optional[float] = None
     online: Optional[bool] = None
     availability_state: str = "UNKNOWN"
     charging_station: Optional[Tuple[int, int]] = None
@@ -37,6 +38,24 @@ class ReservationView:
     robot_id: Any
     position: Tuple[int, int]
     timestep: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ChargingStationView:
+    position: Tuple[int, int]
+    status: str = "AVAILABLE"  # AVAILABLE, RESERVED, OCCUPIED
+    assigned_robot_id: Optional[Any] = None
+
+
+@dataclass(frozen=True)
+class ScenarioComparisonView:
+    scenario_id: int = 1
+    ace_time: float = 0.0
+    baseline_time: float = 0.0
+    improvement_percentage: float = 0.0
+    per_task_times: Dict[Any, Tuple[float, float]] = field(default_factory=dict)
+    ace_collisions: int = 0
+    baseline_collisions: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,9 +96,11 @@ class NormalizedSnapshot:
     custom_obstacles: Tuple[Tuple[int, int], ...] = ()
     dropoff_cells: Tuple[Tuple[int, int], ...] = ()
     edge_dropoff_cells: Tuple[Tuple[int, int], ...] = ()
+    charging_stations: Tuple[ChargingStationView, ...] = ()
     dropoff_station: Optional[Tuple[int, int]] = None
     selected_cell: Optional[Tuple[int, int]] = None
     metrics: MetricView = field(default_factory=MetricView)
+    comparison: Optional[ScenarioComparisonView] = None
     timestep: Optional[int] = None
     time: Optional[float] = None
     scenario_finished: bool = False
@@ -141,7 +162,11 @@ class SnapshotNormalizer:
         # 8. Metrics
         metrics = SnapshotNormalizer._extract_metrics(snapshot, tasks)
 
-        # 9. Grid size
+        # 9. Charging Stations & Scenario Comparison
+        charging_stations = SnapshotNormalizer._extract_charging_stations(snapshot, robots)
+        comparison = SnapshotNormalizer._extract_comparison(snapshot)
+
+        # 10. Grid size
         grid_size = SnapshotNormalizer._determine_grid_size(
             snapshot, obstacles, robots, paths, reservations
         )
@@ -164,9 +189,11 @@ class SnapshotNormalizer:
             custom_obstacles=custom_obstacles,
             dropoff_cells=dropoff_cells,
             edge_dropoff_cells=edge_dropoff_cells,
+            charging_stations=tuple(charging_stations),
             dropoff_station=dropoff_station,
             selected_cell=selected_cell,
             metrics=metrics,
+            comparison=comparison,
             timestep=timestep,
             time=float(time_val) if time_val is not None else None,
             scenario_finished=scenario_finished,
@@ -233,6 +260,12 @@ class SnapshotNormalizer:
                         battery = float(battery)
                     except (ValueError, TypeError):
                         battery = None
+                battery_percentage = item.get("battery_percentage")
+                if battery_percentage is not None:
+                    try:
+                        battery_percentage = max(0.0, min(100.0, float(battery_percentage)))
+                    except (ValueError, TypeError):
+                        battery_percentage = None
                 task_id = item.get("current_task_id", item.get("active_task", item.get("task_id")))
                 online = item.get("online")
                 availability_state = str(item.get("availability_state", "UNKNOWN"))
@@ -249,6 +282,7 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=battery,
+                        battery_percentage=battery_percentage,
                         online=online,
                         availability_state=availability_state,
                         charging_station=charging_station,
@@ -266,6 +300,7 @@ class SnapshotNormalizer:
                     pos = SnapshotNormalizer._to_pos(getattr(state, "position", (0, 0))) or (0, 0)
                     status = str(getattr(state, "status", "UNKNOWN"))
                     battery = getattr(state, "battery", None)
+                    battery_percentage = getattr(state, "battery_percentage", None)
                     online = getattr(state, "online", None)
                     availability_state = str(getattr(state, "availability_state", "UNKNOWN"))
                     charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
@@ -275,6 +310,7 @@ class SnapshotNormalizer:
                     pos = SnapshotNormalizer._to_pos(getattr(item, "position", (0, 0))) or (0, 0)
                     status = str(getattr(item, "status", "UNKNOWN"))
                     battery = getattr(item, "battery", None)
+                    battery_percentage = getattr(item, "battery_percentage", None)
                     online = getattr(item, "online", None)
                     availability_state = str(getattr(item, "availability_state", "UNKNOWN"))
                     charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
@@ -292,6 +328,7 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=float(battery) if battery is not None else None,
+                        battery_percentage=(float(battery_percentage) if battery_percentage is not None else None),
                         online=online,
                         availability_state=availability_state,
                         charging_station=charging_station,
@@ -609,6 +646,51 @@ class SnapshotNormalizer:
             proposed_time=float(proposed_time) if proposed_time is not None else None,
             improvement_percentage=imp_pct,
             raw=summary,
+        )
+
+    @staticmethod
+    def _extract_charging_stations(snapshot: dict, robots: List[RobotView]) -> List[ChargingStationView]:
+        results: List[ChargingStationView] = []
+        raw = snapshot.get("charging_stations")
+        if raw and isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                if isinstance(item, dict):
+                    pos = SnapshotNormalizer._to_pos(item.get("position"))
+                    st = str(item.get("status", "AVAILABLE"))
+                    r_id = item.get("assigned_robot_id")
+                    if pos:
+                        results.append(ChargingStationView(pos, st, r_id))
+                else:
+                    pos = SnapshotNormalizer._to_pos(item)
+                    if pos:
+                        st = "AVAILABLE"
+                        r_id = None
+                        for r in robots:
+                            if r.position == pos:
+                                st = "OCCUPIED"
+                                r_id = r.robot_id
+                                break
+                            elif getattr(r, "charging_station", None) == pos:
+                                if getattr(r, "availability_state", "") in ("GOING_TO_CHARGER", "LOW_BATTERY"):
+                                    st = "RESERVED"
+                                    r_id = r.robot_id
+                                    break
+                        results.append(ChargingStationView(pos, st, r_id))
+        return results
+
+    @staticmethod
+    def _extract_comparison(snapshot: dict) -> Optional[ScenarioComparisonView]:
+        raw = snapshot.get("comparison")
+        if not raw or not isinstance(raw, dict):
+            return None
+        return ScenarioComparisonView(
+            scenario_id=int(raw.get("scenario_id", 1)),
+            ace_time=float(raw.get("ace_time", 0.0)),
+            baseline_time=float(raw.get("baseline_time", 0.0)),
+            improvement_percentage=float(raw.get("improvement_percentage", 0.0)),
+            per_task_times=dict(raw.get("per_task_times", {})),
+            ace_collisions=int(raw.get("ace_collisions", 0)),
+            baseline_collisions=int(raw.get("baseline_collisions", 0)),
         )
 
     @staticmethod
