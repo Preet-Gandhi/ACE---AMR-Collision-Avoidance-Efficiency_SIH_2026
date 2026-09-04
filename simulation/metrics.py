@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass
+from statistics import mean, median
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,47 @@ class BenchmarkResult:
     improvement: float | None
 
     def to_dict(self): return asdict(self)
+
+
+RESULT_FIELDS = ("mode", "seed", "robot_count", "task_count", "completion_time", "throughput", "collisions", "deadlocks", "waiting_time", "total_distance", "replans", "improvement")
+
+
+def benchmark_status(collisions, improvement, minimum_improvement=20.0):
+    return "PASS" if collisions == 0 and improvement >= minimum_improvement else "FAIL"
+
+
+def aggregate_comparisons(comparisons):
+    groups = {}
+    for comparison in comparisons:
+        distributed = comparison["distributed"]
+        key = (distributed["robot_count"], distributed["task_count"])
+        groups.setdefault(key, []).append(comparison)
+    aggregates = []
+    for (robot_count, task_count), rows in sorted(groups.items()):
+        baseline_times = [row["baseline"]["completion_time"] for row in rows]
+        distributed_rows = [row["distributed"] for row in rows]
+        improvements = [row["distributed"]["improvement"] for row in rows]
+        total_collisions = sum(row["distributed"]["collisions"] for row in rows)
+        total_deadlocks = sum(row["distributed"]["deadlocks"] for row in rows)
+        mean_improvement = mean(improvements) if improvements else 0.0
+        aggregates.append({
+            "robot_count": robot_count,
+            "task_count": task_count,
+            "seed_count": len(rows),
+            "baseline_mean_time": mean(baseline_times),
+            "baseline_median_time": median(baseline_times),
+            "distributed_mean_time": mean(row["completion_time"] for row in distributed_rows),
+            "distributed_median_time": median(row["completion_time"] for row in distributed_rows),
+            "mean_throughput": mean(row["throughput"] for row in distributed_rows),
+            "mean_waiting_time": mean(row["waiting_time"] for row in distributed_rows),
+            "mean_total_distance": mean(row["total_distance"] for row in distributed_rows),
+            "mean_replans": mean(row["replans"] for row in distributed_rows),
+            "total_collisions": total_collisions,
+            "total_deadlocks": total_deadlocks,
+            "mean_improvement": mean_improvement,
+            "status": benchmark_status(total_collisions, mean_improvement),
+        })
+    return aggregates
 
 
 class Metrics:
