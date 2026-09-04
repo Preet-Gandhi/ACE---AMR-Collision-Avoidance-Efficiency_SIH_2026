@@ -26,6 +26,8 @@ class Auction:
         return {"task_id": task.task_id, "pickup": tuple(task.pickup),
                 "dropoff": tuple(task.dropoff), "priority": task.priority,
                 "created_time": task.created_time, "deadline": task.deadline,
+                "package_picked_up": task.package_picked_up,
+                "package_position": task.package_position,
                 "auction_id": auction_id, "round": round_number}
 
     def announce_task(self, task, auction_id=None):
@@ -67,7 +69,7 @@ class Auction:
                 return False
             from auction.bid import Bid
             fields = {k: bid[k] for k in ("robot_id", "task_id", "travel_cost", "time_cost",
-                "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "valid") if k in bid}
+                "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "workload_cost", "valid") if k in bid}
             self.submit_bid(Bid(**fields), payload.get("auction_id"), payload.get("round"))
             return True
         return False
@@ -90,10 +92,13 @@ class Auction:
         task.status = TaskStatus.PENDING
         task.assigned_robot_id = None
         self.bids.pop(task.task_id, None)
-        self.announce_task(task)
+        if any(getattr(robot, "distributed", False) for robot in self.robots):
+            self.start_distributed(task)
+        else:
+            self.run_auction(task, verbose=False)
 
     def select_winner(self, bids):
-        ids = {r.robot_id for r in self.robots}
+        ids = {r.robot_id for r in self.robots if r.is_online()}
         valid = [b for b in bids if b.valid and b.robot_id in ids]
         return min(valid, key=lambda b: (b.total_cost, b.robot_id)) if valid else None
 

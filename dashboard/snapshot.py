@@ -11,6 +11,9 @@ class RobotView:
     position: Tuple[int, int]
     status: str = "UNKNOWN"
     battery: Optional[float] = None
+    online: Optional[bool] = None
+    availability_state: str = "UNKNOWN"
+    charging_station: Optional[Tuple[int, int]] = None
     current_task_id: Optional[Any] = None
     path: Tuple[Tuple[int, int], ...] = ()
     has_package: bool = False
@@ -231,6 +234,9 @@ class SnapshotNormalizer:
                     except (ValueError, TypeError):
                         battery = None
                 task_id = item.get("current_task_id", item.get("active_task", item.get("task_id")))
+                online = item.get("online")
+                availability_state = str(item.get("availability_state", "UNKNOWN"))
+                charging_station = SnapshotNormalizer._to_pos(item.get("charging_station"))
                 raw_path = item.get("path") or ()
                 path_list = [
                     p for p in (SnapshotNormalizer._to_pos(pt) for pt in raw_path) if p is not None
@@ -243,6 +249,9 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=battery,
+                        online=online,
+                        availability_state=availability_state,
+                        charging_station=charging_station,
                         current_task_id=task_id,
                         path=tuple(path_list),
                         has_package=has_package,
@@ -257,12 +266,18 @@ class SnapshotNormalizer:
                     pos = SnapshotNormalizer._to_pos(getattr(state, "position", (0, 0))) or (0, 0)
                     status = str(getattr(state, "status", "UNKNOWN"))
                     battery = getattr(state, "battery", None)
+                    online = getattr(state, "online", None)
+                    availability_state = str(getattr(state, "availability_state", "UNKNOWN"))
+                    charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
                     task_id = getattr(state, "current_task_id", None)
                     raw_path = getattr(state, "path", ())
                 else:
                     pos = SnapshotNormalizer._to_pos(getattr(item, "position", (0, 0))) or (0, 0)
                     status = str(getattr(item, "status", "UNKNOWN"))
                     battery = getattr(item, "battery", None)
+                    online = getattr(item, "online", None)
+                    availability_state = str(getattr(item, "availability_state", "UNKNOWN"))
+                    charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
                     task_id = getattr(item, "current_task_id", None)
                     raw_path = getattr(item, "path", ())
 
@@ -277,6 +292,9 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=float(battery) if battery is not None else None,
+                        online=online,
+                        availability_state=availability_state,
+                        charging_station=charging_station,
                         current_task_id=task_id,
                         path=tuple(path_list),
                         has_package=has_package,

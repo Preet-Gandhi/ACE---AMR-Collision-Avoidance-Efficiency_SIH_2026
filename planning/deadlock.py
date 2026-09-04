@@ -44,6 +44,7 @@ class DeadlockDetector:
         """
 
         robots = list(robots)
+        robots = [robot for robot in robots if robot.is_online()]
 
         graph = {
             robot.robot_id: set()

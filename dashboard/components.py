@@ -31,7 +31,8 @@ class ComponentFormatter:
         for r in robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
             pos_str = f"({r.position[0]}, {r.position[1]})"
-            raw_status = r.status.upper() if r.status else "UNKNOWN"
+            raw_status = (r.availability_state if r.availability_state not in {"", "UNKNOWN"}
+                          else r.status).upper()
             is_conflicted = str(r.robot_id) in conflicted_robots
 
             if is_conflicted:
@@ -43,6 +44,9 @@ class ComponentFormatter:
             elif raw_status == "MOVING":
                 status_str = "MOVING"
                 color_code = C_GREEN
+            elif raw_status == "DISCHARGED":
+                status_str = "DISCHARGED"
+                color_code = C_RED
             else:
                 status_str = raw_status
                 color_code = ""
