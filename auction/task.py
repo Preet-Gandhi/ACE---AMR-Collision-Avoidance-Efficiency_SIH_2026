@@ -24,6 +24,8 @@ class Task:
     assigned_robot_id: Optional[int] = None
 
     def assign(self, robot_id: int) -> None:
+        if self.assigned_robot_id == robot_id and self.status in (TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS):
+            return
         if not self.is_available():
             raise ValueError("task is not available")
         self.assigned_robot_id = robot_id
@@ -42,3 +44,6 @@ class Task:
 
     def is_available(self) -> bool:
         return self.status in (TaskStatus.PENDING, TaskStatus.AUCTIONING)
+
+    def is_finished(self) -> bool:
+        return self.status in (TaskStatus.COMPLETED, TaskStatus.FAILED)

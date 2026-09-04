@@ -9,14 +9,19 @@ class Simulator:
         self.reservation_table, self.metrics, self.auction = reservation_table, metrics, auction
         self.dt, self.time = dt, 0.0; self.collision_detector = CollisionDetector(); self.deadlock_detector = DeadlockDetector()
     def step(self):
+        self.reservation_table.release_expired(round(self.time / self.dt))
         for robot in self.robots:
             robot.set_time(round(self.time / self.dt))
+        for robot in sorted(self.robots, key=lambda item: (-item.calculate_priority(), item.robot_id)):
             robot.update()
         for robot in self.robots:
-            if robot.detect_conflict(): robot.handle_conflict()
+            if robot.detect_conflict(): robot.handle_conflict(self.dt)
             else:
                 if robot.move(): self.metrics.record_movement(robot, 1.0)
         for a, b in self.collision_detector.detect_all_collisions(self.robots): self.metrics.record_collision(a, b)
+        for a, b in self.collision_detector.detect_all_path_conflicts(self.robots):
+            if (a, b) not in self.collision_detector.detect_all_collisions(self.robots):
+                a.handle_conflict(self.dt); b.handle_conflict(self.dt)
         for robot in self.robots:
             if robot.is_task_complete():
                 task = robot.tasks[robot.state.current_task_id]; robot.complete_task(); self.metrics.record_task_completed(task, robot)
