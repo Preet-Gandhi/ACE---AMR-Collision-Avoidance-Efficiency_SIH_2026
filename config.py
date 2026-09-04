@@ -18,3 +18,10 @@ class Config:
     congestion_penalty: float = 2.0
     priority_bonus: float = 1.0
     invalid_bid_penalty: float = 1_000_000.0
+    # Keep established reservation-only behavior unless ORCA is enabled
+    # explicitly for a simulation run.
+    orca_enabled: bool = False
+    orca_neighbor_distance: float = 3.0
+    orca_time_horizon: float = 2.0
+    orca_robot_radius: float = 0.5
+    orca_max_speed: float = 1.0

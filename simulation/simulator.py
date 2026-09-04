@@ -13,6 +13,7 @@ class Simulator:
         metrics,
         auction=None,
         dt=0.1,
+        orca_enabled=False,
     ):
         self.warehouse = warehouse
         self.robots = list(robots)
@@ -23,6 +24,7 @@ class Simulator:
         self.auction = auction
 
         self.dt = dt
+        self.orca_enabled = orca_enabled
         self.time = 0.0
 
         self.collision_detector = CollisionDetector()
@@ -56,6 +58,7 @@ class Simulator:
         # Synchronize robot clocks.
         for robot in self.robots:
             robot.set_time(timestep)
+            robot.orca_enabled = self.orca_enabled
 
         # --------------------------------------------------------------
         # ROBOT UPDATE
@@ -73,6 +76,11 @@ class Simulator:
         # --------------------------------------------------------------
         # MOVEMENT / LOCAL CONFLICT HANDLING
         # --------------------------------------------------------------
+
+        for robot in self.robots:
+            result = robot.prepare_orca(self.robots, self.dt)
+            if result is not None:
+                self.metrics.record_orca(result, robot._orca_preferred_velocity, robot._orca_target is not None)
 
         for robot in self.robots:
             if robot.detect_conflict():
@@ -301,6 +309,11 @@ class Simulator:
         self.metrics.__init__()
 
         self.reservation_table._reservations.clear()
+
+        for robot in self.robots:
+            robot._orca_target = None
+            robot._orca_result = None
+            robot.state.velocity = (0, 0)
 
         # Reset deadlock bookkeeping.
         self._counted_deadlock_cycles.clear()

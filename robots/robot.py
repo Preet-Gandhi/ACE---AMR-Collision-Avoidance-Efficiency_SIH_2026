@@ -1,10 +1,11 @@
 from auction.bid import Bid
 from communication.message import Message, MessageType
+from planning.orca import ORCAAgent, ORCASolver
 from robots.state import RobotState
 
 
 class Robot:
-    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0):
+    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0):
         self.robot_id, self.warehouse, self.planner = robot_id, warehouse, planner
         self.network, self.reservation_table = network, reservation_table
         self.state, self.known_states, self.tasks = RobotState(robot_id, tuple(start_position), battery=battery), {}, {}
@@ -17,6 +18,13 @@ class Robot:
         self.blockage_waiting = 0.0
         self.auction = None
         self.robot_speed, self.congestion_penalty, self.priority_bonus, self.invalid_bid_penalty = robot_speed, congestion_penalty, priority_bonus, invalid_bid_penalty
+        self.orca_enabled = orca_enabled
+        self.orca_robot_radius = orca_robot_radius
+        self.orca_max_speed = orca_max_speed
+        self.orca_solver = ORCASolver(orca_neighbor_distance, orca_time_horizon, 0.1)
+        self._orca_target = None
+        self._orca_result = None
+        self._orca_preferred_velocity = (0.0, 0.0)
         network.register(self)
         self.current_time = 0
         reservation_table.register_priority(robot_id, 0)
@@ -90,7 +98,7 @@ class Robot:
         if self.auction is not None: self.auction.release_task(task)
         return task
     def broadcast_state(self):
-        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "status": self.state.status}))
+        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "velocity": self.state.velocity, "status": self.state.status}))
     def receive_message(self, message):
         if message.message_type == MessageType.STATE: self.known_states[message.sender_id] = message.payload
         elif message.message_type in (MessageType.OBSTACLE, MessageType.OBSTACLE_DETECTED):
@@ -107,9 +115,63 @@ class Robot:
                 if self.blockage_waiting >= self.wait_threshold: self.fail_current_task()
 
     def set_time(self, timestep): self.current_time = timestep
-    def move(self):
+    def prepare_orca(self, robots, duration=0.1):
+        """Choose a local grid target using ORCA without changing the A* path."""
+        self._orca_target = None
+        self._orca_result = None
+        self._orca_preferred_velocity = (0.0, 0.0)
+        if not self.orca_enabled:
+            return None
         nxt = self.state.get_next_position()
+        if nxt is None:
+            return None
+        dx, dy = nxt[0] - self.state.position[0], nxt[1] - self.state.position[1]
+        distance = (dx * dx + dy * dy) ** 0.5
+        if distance <= 1e-9:
+            return None
+        preferred = (dx / distance * self.orca_max_speed, dy / distance * self.orca_max_speed)
+        self.orca_solver.timestep = max(duration, 1e-6)
+        agent = ORCAAgent(tuple(map(float, self.state.position)), tuple(map(float, self.state.velocity)), preferred, self.orca_robot_radius, self.orca_max_speed)
+        others = []
+        for other in robots:
+            if other.robot_id == self.robot_id:
+                continue
+            others.append(ORCAAgent(tuple(map(float, other.state.position)), tuple(map(float, other.state.velocity)), (0.0, 0.0), self.orca_robot_radius, self.orca_max_speed))
+        result = self.orca_solver.compute_velocity(agent, others)
+        self._orca_result = result
+        self._orca_preferred_velocity = preferred
+
+        if result.feasible and (result.velocity[0] ** 2 + result.velocity[1] ** 2) > 1e-8:
+            # In the discrete phase ORCA is advisory: the A* waypoint stays
+            # authoritative. Arbitrary side-steps belong to the future
+            # continuous movement phase because they invalidate reservations.
+            if not any(nxt == other.state.position or
+                       getattr(other, "_orca_target", None) == self.state.position
+                       for other in robots if other.robot_id != self.robot_id):
+                owner = self.reservation_table.get_owner(nxt, self.current_time + 1)
+                if owner in (None, self.robot_id):
+                    if owner is None:
+                        self.reservation_table.reserve(self.robot_id, nxt, self.current_time + 1)
+                    self._orca_target = nxt
+        elif result.used_fallback:
+            # Reservation ownership is the discrete safety authority. If the
+            # continuous constraint approximation has no sampled velocity,
+            # retain the already-reserved A* step instead of starving a task.
+            if not any(nxt == other.state.position or
+                       getattr(other, "_orca_target", None) == self.state.position
+                       for other in robots if other.robot_id != self.robot_id):
+                if self.reservation_table.get_owner(nxt, self.current_time + 1) == self.robot_id:
+                    self._orca_target = nxt
+        return result
+
+    def move(self):
+        planned = self.state.get_next_position()
+        nxt = self._orca_target if self.orca_enabled and self._orca_result is not None else planned
+        detour = nxt is not None and planned is not None and nxt != planned
+        self._orca_target = None
         if nxt is None: return False
+        if not self.warehouse.is_walkable(nxt):
+            return False
         if self.reservation_table.get_owner(nxt, self.current_time + 1) != self.robot_id:
             self.state.status = "WAITING"
             self.waiting_time += 0.1
@@ -120,10 +182,19 @@ class Robot:
                 self.fail_current_task()
             return False
         self.state.update_velocity((nxt[0] - self.state.position[0], nxt[1] - self.state.position[1]))
-        self.state.update_position(nxt); self.state.path_index += 1; self.state.consume_battery(1)
+        self.state.update_position(nxt)
+        if planned == nxt:
+            self.state.path_index += 1
+        self.state.consume_battery(1)
         self.distance_travelled += 1.0
         self.waiting_time = 0.0
         self.blockage_waiting = 0.0
+        if detour:
+            # A grid side-step changes the route's adjacency. Rebuild the
+            # remaining route from the new cell on the next planning state.
+            self.release_reservation()
+            self.state.clear_path()
+            self.plan_path()
         return True
     def is_task_complete(self):
         task = self.tasks.get(self.state.current_task_id)
@@ -140,7 +211,7 @@ class Robot:
     def request_reservation(self): return bool(self.state.path) and self.reservation_table.reserve_path(self.robot_id, self.state.path)
     def release_reservation(self): self.reservation_table.release(self.robot_id)
     def detect_conflict(self):
-        next_position = self.state.get_next_position()
+        next_position = self._orca_target if self.orca_enabled and self._orca_result is not None else self.state.get_next_position()
         return next_position is not None and self.reservation_table.get_owner(next_position, self.current_time + 1) not in (None, self.robot_id)
     def calculate_priority(self):
         task_priority = 0
