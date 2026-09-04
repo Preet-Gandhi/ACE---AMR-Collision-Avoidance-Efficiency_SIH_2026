@@ -93,26 +93,78 @@ class Robot:
             position = payload.get("position") if isinstance(payload, dict) else None
             if position is not None:
                 occupied.add(tuple(position))
-        if tuple(task.dropoff) not in occupied:
+        # Prefer live in-process peer positions when available; state
+        # broadcasts can be one simulation tick behind.
+        for other in self.network.peers.values():
+            if other.robot_id != self.robot_id:
+                occupied.add(tuple(other.state.position))
+        current = tuple(self.state.position)
+        target = tuple(task.dropoff)
+
+        # If the robot is already sitting in a valid delivery bay, use that
+        # bay. This avoids trying to cross a wall of parked/completed AMRs
+        # just to reach an earlier allocation.
+        if current in cells and self.warehouse.is_walkable(current):
+            task.dropoff = current
             return
-        free = [cell for cell in cells if tuple(cell) not in occupied and self.warehouse.is_walkable(cell)]
+
+        if target not in occupied:
+            return
+
+        free = [
+            tuple(cell) for cell in cells
+            if tuple(cell) not in occupied and self.warehouse.is_walkable(cell)
+        ]
         if free:
-            task.dropoff = min(free, key=lambda cell: (abs(cell[0] - self.state.position[0]) + abs(cell[1] - self.state.position[1]), cell))
+            # Prefer a bay with a short route that is actually reachable in
+            # the current physical state, not merely Manhattan-close.
+            candidates = []
+            for cell in free:
+                route = self.planner.find_path(
+                    current,
+                    cell,
+                    self.reservation_table,
+                    self.current_time,
+                    blocked=occupied - {current},
+                    robot_id=self.robot_id,
+                )
+                if route:
+                    candidates.append((len(route), cell, route))
+            if candidates:
+                task.dropoff = min(candidates, key=lambda item: (item[0], item[1]))[1]
 
     def plan_path(self):
         self.last_plan_reserved = False
-        task = self.tasks[self.state.current_task_id]
+        if self.state.current_task_id is None:
+            return []
+        task = self.tasks.get(self.state.current_task_id)
+        if task is None:
+            self.state.clear_task()
+            return []
         # Reaching the pickup cell completes the pickup phase.
         if not self.state.carrying_package and self.state.position == task.pickup:
             self.state.carrying_package = True
         self._choose_available_dropoff(task)
         goal = task.dropoff if self.state.carrying_package else task.pickup
+        # Physical occupancy is separate from the reservation table. In
+        # particular, an idle/waiting robot may have released its future
+        # reservations while still physically occupying a cell. Treat those
+        # cells as temporary planning obstacles so another robot can route
+        # around parked AMRs instead of freezing behind an unreserved body.
+        blocked = self._local_obstacle_blocks()
+        for other in self.network.peers.values():
+            if other.robot_id == self.robot_id:
+                continue
+            if other.state.status in {"IDLE", "WAITING"}:
+                blocked.add(tuple(other.state.position))
+        blocked.discard(tuple(self.state.position))
+
         path = self.planner.find_path(
             self.state.position,
             goal,
             self.reservation_table,
             self.current_time,
-            blocked=self._local_obstacle_blocks(),
+            blocked=blocked,
             robot_id=self.robot_id,
         )
         priority = self.calculate_priority()
@@ -517,7 +569,7 @@ class Robot:
 
     def move(self, blocked_positions=None):
         planned = self.state.get_next_position()
-        nxt = self._orca_target if self.orca_enabled and self._orca_result is not None else planned
+        nxt = self._orca_target if self._orca_target is not None else planned
         detour = nxt is not None and planned is not None and nxt != planned
         self._orca_target = None
         if nxt is None: return False
@@ -530,6 +582,11 @@ class Robot:
             self.state.status = "WAITING"
             self.waiting_time += 0.1
             self.blockage_waiting += 0.1
+            # Physical occupancy is not represented by a reservation owner.
+            # Replan after sustained blockage so the robot can route around
+            # a parked/completed AMR or select another delivery bay.
+            if self.waiting_time >= self.wait_threshold:
+                self.replan()
             return False
         reservation_time = int(self.current_time) + 1
         owner = self.reservation_table.get_owner(nxt, reservation_time)
@@ -610,6 +667,8 @@ class Robot:
             self.state.clear_task()
     def handle_blockage(self): self.replan()
     def replan(self):
+        if self.state.current_task_id is None:
+            return []
         self.replan_count += 1
         self.reservation_table.release(self.robot_id)
         self.state.clear_path()

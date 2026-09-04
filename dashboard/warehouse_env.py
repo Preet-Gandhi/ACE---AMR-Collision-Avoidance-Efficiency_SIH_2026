@@ -277,15 +277,18 @@ class WarehouseEnvironment:
             count = len(valid_pickups)
         chosen_pickups = random.sample(valid_pickups, count)
 
-        # 2. Candidate edge dropoff locations (perimeter cells excluding corners and obstacles)
+        # 2. Candidate delivery-bay slots. Keep generated scenarios aligned
+        # with the physical dropoff station instead of sending robots to
+        # arbitrary perimeter cells (which produced the bad-looking long
+        # routes visible in the dashboard).
         valid_dropoffs = [
-            pos for pos in self.EDGE_DROPOFF_CELLS
+            pos for pos in self.DROPOFF_CELLS
             if pos not in self.custom_obstacles
             and pos not in chosen_pickups
-            and pos not in self.CORNERS
+            and self.warehouse.is_walkable(pos)
         ]
         if len(valid_dropoffs) < count:
-            count = min(count, len(valid_dropoffs))
+            count = len(valid_dropoffs)
         chosen_dropoffs = random.sample(valid_dropoffs, count)
 
         self.current_scenario_task_ids = []

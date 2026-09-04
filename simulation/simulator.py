@@ -55,7 +55,7 @@ class Simulator:
         self.reservation_table.release_expired(
             timestep
         )
-        self.reservation_table.release_expired_leases(self.time)
+        self.reservation_table.release_expired_leases(timestep)
 
         # Synchronize robot clocks.
         for robot in self.robots:
@@ -326,8 +326,18 @@ class Simulator:
         self.metrics.__init__()
 
         self.reservation_table._reservations.clear()
+        self.reservation_table._edge_reservations.clear()
+        self.reservation_table._leases.clear()
+        self.reservation_table._edge_leases.clear()
 
         for robot in self.robots:
+            self.reservation_table.register_priority(robot.robot_id, 0)
+            robot.waiting_time = 0.0
+            robot.blockage_waiting = 0.0
+            robot.replan_count = 0
+            robot.pending_reservations.clear()
+            robot.reservation_leases.clear()
+            robot.last_plan_reserved = False
             robot._orca_target = None
             robot._orca_result = None
             robot.state.velocity = (0, 0)
