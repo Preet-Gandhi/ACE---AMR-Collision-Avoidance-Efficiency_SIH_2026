@@ -1,2 +1,2 @@
 robot_count,task_count,seed_count,baseline_mean_time,baseline_median_time,distributed_mean_time,distributed_median_time,mean_throughput,mean_waiting_time,mean_total_distance,mean_replans,total_collisions,total_deadlocks,mean_improvement,status
-3,5,1,17.69999999999998,17.69999999999998,10.499999999999979,10.499999999999979,0.47619047619047716,0.0,177.0,0,0,105,40.67796610169497,PASS
+3,5,1,17.69999999999998,17.69999999999998,8.499999999999986,8.499999999999986,0.5882352941176481,0.0,188.0,0,0,0,51.97740112994354,PASS

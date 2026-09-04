@@ -46,7 +46,7 @@ def build_benchmark(seed, robot_count=3, task_count=20, mode="distributed"):
     planner = AStarPlanner(warehouse)
     starts = [(i % config.grid_width, i // config.grid_width) for i in range(robot_count)]
     robot_type = BenchmarkRobot if mode == "distributed" else Robot
-    robots = [robot_type(i, start, warehouse, planner, network, reservations, battery=10_000.0, robot_speed=config.robot_speed, congestion_penalty=config.congestion_penalty, priority_bonus=config.priority_bonus, invalid_bid_penalty=config.invalid_bid_penalty, distributed=(mode == "distributed")) for i, start in enumerate(starts)]
+    robots = [robot_type(i, start, warehouse, planner, network, reservations, battery=10_000.0, robot_speed=config.robot_speed, congestion_penalty=config.congestion_penalty, priority_bonus=config.priority_bonus, invalid_bid_penalty=config.invalid_bid_penalty, distributed=(mode == "distributed"), orca_enabled=(mode == "distributed")) for i, start in enumerate(starts)]
     auction = Auction(network, robots)
     tasks = create_tasks(seed, task_count, config.grid_width, config.grid_height)
     for task in tasks:
@@ -55,7 +55,7 @@ def build_benchmark(seed, robot_count=3, task_count=20, mode="distributed"):
             auction.start_distributed(task)
         else:
             auction.run_auction(task, verbose=False)
-    simulator = Simulator(warehouse, robots, network, reservations, metrics, auction, config.simulation_dt)
+    simulator = Simulator(warehouse, robots, network, reservations, metrics, auction, config.simulation_dt, orca_enabled=(mode == "distributed"))
     return simulator, robots, tasks
 
 
