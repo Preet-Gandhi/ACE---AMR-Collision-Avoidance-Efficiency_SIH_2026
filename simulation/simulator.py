@@ -55,6 +55,7 @@ class Simulator:
         self.reservation_table.release_expired(
             timestep
         )
+        self.reservation_table.release_expired_leases(self.time)
 
         # Synchronize robot clocks.
         for robot in self.robots:
@@ -285,30 +286,28 @@ class Simulator:
 
     def spawn_task(self, task):
         self.warehouse.add_task(task)
+        if self.auction is not None:
+            if any(getattr(robot, "distributed", False) for robot in self.robots):
+                self.auction.start_distributed(task)
+            else:
+                self.auction.run_auction(task, verbose=False)
 
     def spawn_obstacle(self, position):
         self.warehouse.add_obstacle(
             position
         )
-
-        for robot in self.robots:
-            robot.network.broadcast(
-                -1,
-                Message(
-                    -1,
-                    MessageType.OBSTACLE,
-                    self.time,
-                    {
-                        "position": tuple(
-                            position
-                        )
-                    },
-                ),
-            )
+        self.network.broadcast(
+            -1,
+            Message(-1, MessageType.OBSTACLE, self.time, {"position": tuple(position), "source": "simulator"}),
+        )
 
     def remove_obstacle(self, position):
         self.warehouse.remove_obstacle(
             position
+        )
+        self.network.broadcast(
+            -1,
+            Message(-1, MessageType.OBSTACLE_CLEARED, self.time, {"position": tuple(position), "source": "simulator"}),
         )
 
     # ------------------------------------------------------------------

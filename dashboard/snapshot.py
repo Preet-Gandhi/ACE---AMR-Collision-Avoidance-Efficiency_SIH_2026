@@ -25,6 +25,8 @@ class TaskView:
     pickup: Optional[Tuple[int, int]] = None
     dropoff: Optional[Tuple[int, int]] = None
     assigned_robot_id: Optional[Any] = None
+    is_picked_up: bool = False
+    is_finished: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,11 +73,13 @@ class NormalizedSnapshot:
     shelves: Tuple[Tuple[int, int], ...] = ()
     custom_obstacles: Tuple[Tuple[int, int], ...] = ()
     dropoff_cells: Tuple[Tuple[int, int], ...] = ()
+    edge_dropoff_cells: Tuple[Tuple[int, int], ...] = ()
     dropoff_station: Optional[Tuple[int, int]] = None
     selected_cell: Optional[Tuple[int, int]] = None
     metrics: MetricView = field(default_factory=MetricView)
     timestep: Optional[int] = None
     time: Optional[float] = None
+    scenario_finished: bool = False
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -111,8 +115,10 @@ class SnapshotNormalizer:
 
         # 2. Dropoff configuration
         dropoff_cells = SnapshotNormalizer._extract_pos_list(snapshot.get("dropoff_cells"))
+        edge_dropoff_cells = SnapshotNormalizer._extract_pos_list(snapshot.get("edge_dropoff_cells"))
         dropoff_station = SnapshotNormalizer._to_pos(snapshot.get("dropoff_station"))
         selected_cell = SnapshotNormalizer._to_pos(snapshot.get("selected_cell"))
+        scenario_finished = bool(snapshot.get("scenario_finished", False))
 
         # 3. Robots
         robots = SnapshotNormalizer._extract_robots(snapshot)
@@ -154,11 +160,13 @@ class SnapshotNormalizer:
             shelves=shelves,
             custom_obstacles=custom_obstacles,
             dropoff_cells=dropoff_cells,
+            edge_dropoff_cells=edge_dropoff_cells,
             dropoff_station=dropoff_station,
             selected_cell=selected_cell,
             metrics=metrics,
             timestep=timestep,
             time=float(time_val) if time_val is not None else None,
+            scenario_finished=scenario_finished,
             raw=dict(snapshot) if isinstance(snapshot, dict) else {},
         )
 
@@ -304,42 +312,50 @@ class SnapshotNormalizer:
 
         for item in iterable:
             if isinstance(item, dict):
-                t_id = item.get("task_id", item.get("id"))
-                status = item.get("status", "PENDING")
-                if hasattr(status, "value"):
-                    status = status.value
-                priority = item.get("priority", 0)
-                pickup = SnapshotNormalizer._to_pos(item.get("pickup"))
-                dropoff = SnapshotNormalizer._to_pos(item.get("dropoff"))
-                assigned = item.get("assigned_robot_id")
-                tasks.append(
-                    TaskView(
-                        task_id=t_id,
-                        status=str(status),
-                        priority=int(priority) if priority is not None else 0,
-                        pickup=pickup,
-                        dropoff=dropoff,
-                        assigned_robot_id=assigned,
-                    )
-                )
+                 t_id = item.get("task_id", item.get("id"))
+                 status = item.get("status", "PENDING")
+                 if hasattr(status, "value"):
+                     status = status.value
+                 priority = item.get("priority", 0)
+                 pickup = SnapshotNormalizer._to_pos(item.get("pickup"))
+                 dropoff = SnapshotNormalizer._to_pos(item.get("dropoff"))
+                 assigned = item.get("assigned_robot_id")
+                 is_picked_up = bool(item.get("is_picked_up", False))
+                 is_finished = bool(item.get("is_finished", str(status) in ("COMPLETED", "FAILED")))
+                 tasks.append(
+                     TaskView(
+                         task_id=t_id,
+                         status=str(status),
+                         priority=int(priority) if priority is not None else 0,
+                         pickup=pickup,
+                         dropoff=dropoff,
+                         assigned_robot_id=assigned,
+                         is_picked_up=is_picked_up,
+                         is_finished=is_finished,
+                     )
+                 )
             else:
-                t_id = getattr(item, "task_id", getattr(item, "id", None))
-                raw_st = getattr(item, "status", "PENDING")
-                status = getattr(raw_st, "value", str(raw_st))
-                priority = getattr(item, "priority", 0)
-                pickup = SnapshotNormalizer._to_pos(getattr(item, "pickup", None))
-                dropoff = SnapshotNormalizer._to_pos(getattr(item, "dropoff", None))
-                assigned = getattr(item, "assigned_robot_id", None)
-                tasks.append(
-                    TaskView(
-                        task_id=t_id,
-                        status=str(status),
-                        priority=int(priority) if priority is not None else 0,
-                        pickup=pickup,
-                        dropoff=dropoff,
-                        assigned_robot_id=assigned,
-                    )
-                )
+                 t_id = getattr(item, "task_id", getattr(item, "id", None))
+                 raw_st = getattr(item, "status", "PENDING")
+                 status = getattr(raw_st, "value", str(raw_st))
+                 priority = getattr(item, "priority", 0)
+                 pickup = SnapshotNormalizer._to_pos(getattr(item, "pickup", None))
+                 dropoff = SnapshotNormalizer._to_pos(getattr(item, "dropoff", None))
+                 assigned = getattr(item, "assigned_robot_id", None)
+                 is_picked_up = bool(getattr(item, "is_picked_up", False))
+                 is_finished = bool(getattr(item, "is_finished", lambda: str(status) in ("COMPLETED", "FAILED"))() if callable(getattr(item, "is_finished", None)) else getattr(item, "is_finished", False))
+                 tasks.append(
+                     TaskView(
+                         task_id=t_id,
+                         status=str(status),
+                         priority=int(priority) if priority is not None else 0,
+                         pickup=pickup,
+                         dropoff=dropoff,
+                         assigned_robot_id=assigned,
+                         is_picked_up=is_picked_up,
+                         is_finished=is_finished,
+                     )
+                 )
 
         return tasks
 

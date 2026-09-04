@@ -14,7 +14,7 @@ def build_simulation(config=None):
     config = config or Config(); warehouse = Warehouse((config.grid_width, config.grid_height))
     network, reservations, metrics = Network(), ReservationTable(), Metrics()
     planner = AStarPlanner(warehouse)
-    robots = [Robot(i, (i, 0), warehouse, planner, network, reservations, config.initial_battery, config.robot_speed, config.congestion_penalty, config.priority_bonus, config.invalid_bid_penalty, config.orca_enabled, config.orca_neighbor_distance, config.orca_time_horizon, config.orca_robot_radius, config.orca_max_speed) for i in range(config.num_robots)]
+    robots = [Robot(i, (i, 0), warehouse, planner, network, reservations, config.initial_battery, config.robot_speed, config.congestion_penalty, config.priority_bonus, config.invalid_bid_penalty, config.orca_enabled, config.orca_neighbor_distance, config.orca_time_horizon, config.orca_robot_radius, config.orca_max_speed, config.distributed_auction, config.reservation_lease, config.reservation_horizon, config.obstacle_sensor_radius, config.obstacle_safety_radius) for i in range(config.num_robots)]
     auction = Auction(network, robots)
     tasks = [
         Task(0, (0, 1), (config.grid_width - 1, config.grid_height - 1), priority=1),
@@ -24,7 +24,11 @@ def build_simulation(config=None):
         Task(4, (4, 5), (config.grid_width - 5, config.grid_height - 5), priority=0),
     ]
     for task in tasks: warehouse.add_task(task)
-    for task in warehouse.get_pending_tasks(): auction.run_auction(task)
+    for task in warehouse.get_pending_tasks():
+        if config.distributed_auction:
+            auction.start_distributed(task)
+        else:
+            auction.run_auction(task)
     return Simulator(warehouse, robots, network, reservations, metrics, auction, config.simulation_dt, config.orca_enabled), robots
 
 
