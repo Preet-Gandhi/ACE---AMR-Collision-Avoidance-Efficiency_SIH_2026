@@ -1,5 +1,5 @@
 from auction.bid import Bid
-from auction.task import Task
+from auction.task import Task, TaskStatus
 import math
 from communication.message import Message, MessageType
 from planning.orca import ORCAAgent, ORCASolver
@@ -7,12 +7,21 @@ from robots.state import RobotState
 
 
 class Robot:
-    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0, distributed=False, reservation_lease=20, reservation_horizon=20, obstacle_sensor_radius=2, obstacle_safety_radius=0):
+    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0, distributed=False, reservation_lease=20, reservation_horizon=20, obstacle_sensor_radius=2, obstacle_safety_radius=0, battery_consumption_per_move=1.0, offline_battery_cutoff=0.0, charging_station=None, charging_rate_per_step=1.0, workload_penalty=5.0):
         self.robot_id, self.warehouse, self.planner = robot_id, warehouse, planner
         self.network, self.reservation_table = network, reservation_table
         self.state, self.known_states, self.tasks = RobotState(robot_id, tuple(start_position), battery=battery), {}, {}
         self.task_queue = []
         self.initial_battery = battery
+        self.battery_consumption_per_move = max(0.0, float(battery_consumption_per_move))
+        self.offline_battery_cutoff = float(offline_battery_cutoff)
+        self.charging_station = tuple(charging_station) if charging_station is not None else None
+        self.charging_rate_per_step = max(0.0, float(charging_rate_per_step))
+        self.workload_penalty = max(0.0, float(workload_penalty))
+        if self.state.battery <= self.offline_battery_cutoff:
+            self.state.online = False
+            self.state.availability_state = "DISCHARGED"
+            self.state.status = "DISCHARGED"
         self.waiting_time = 0.0
         self.distance_travelled = 0.0
         self.last_priority = 0.0
@@ -50,7 +59,153 @@ class Robot:
         self.current_time = 0
         reservation_table.register_priority(robot_id, 0)
 
-    def can_bid(self, task): return task.is_available() and task.task_id not in self.tasks and task.task_id not in {t.task_id for t in self.task_queue}
+    def is_online(self):
+        return self.state.online and self.state.availability_state == "ONLINE" and self.state.battery > self.offline_battery_cutoff
+
+    def is_available_for_auction(self):
+        return self.is_online()
+
+    def _path_energy(self, path):
+        return max(0, len(path) - 1) * self.battery_consumption_per_move
+
+    def _find_path(self, start, goal):
+        if start == goal:
+            return [tuple(start)]
+        return self.planner.find_path(tuple(start), tuple(goal)) or []
+
+    def energy_required_to_charge(self):
+        if self.charging_station is None:
+            return 0.0
+        path = self._find_path(self.state.position, self.charging_station)
+        return self._path_energy(path) if path else float("inf")
+
+    def energy_required_for_task(self, task):
+        start = self._projected_position()
+        if task.package_picked_up:
+            task_path = self._find_path(start, task.dropoff)
+            endpoint = task.dropoff
+        else:
+            to_pickup = self._find_path(start, task.pickup)
+            to_dropoff = self._find_path(task.pickup, task.dropoff)
+            task_path = to_pickup + to_dropoff[1:] if to_pickup and to_dropoff else []
+            endpoint = task.dropoff
+        if not task_path:
+            return float("inf")
+        if self.charging_station is None:
+            return self._path_energy(task_path)
+        to_charger = self._find_path(endpoint, self.charging_station)
+        if not to_charger:
+            return float("inf")
+        return self._path_energy(task_path) + self._path_energy(to_charger)
+
+    def should_divert_to_charge(self):
+        if self.charging_station is None or not self.is_online():
+            return False
+        if self.state.current_task_id is None:
+            return self.state.battery <= self.energy_required_to_charge()
+        task = self.tasks.get(self.state.current_task_id)
+        if task is None:
+            return False
+        goal = task.dropoff if self.state.carrying_package else task.pickup
+        first_leg = self._find_path(self.state.position, goal)
+        second_leg = [] if self.state.carrying_package else self._find_path(task.pickup, task.dropoff)
+        if not first_leg or (not self.state.carrying_package and not second_leg):
+            return True
+        task_path = first_leg if self.state.carrying_package else first_leg + second_leg[1:]
+        if not task_path:
+            return False
+        to_charger = self._find_path(task.dropoff, self.charging_station)
+        if not to_charger:
+            return True
+        return self.state.battery < self._path_energy(task_path) + self._path_energy(to_charger)
+
+    def _requeue_task_for_charging(self, task, carrying=False):
+        if carrying:
+            task.package_picked_up = True
+            task.package_position = tuple(self.state.position)
+            task.pickup = tuple(self.state.position)
+        task.assigned_robot_id = None
+        task.status = TaskStatus.PENDING
+        if self.auction is not None:
+            self.auction.release_task(task)
+
+    def _plan_charger_path(self):
+        if self.charging_station is None:
+            return False
+        if self.state.position == self.charging_station:
+            self.state.clear_path()
+            return True
+        blocked = {tuple(peer.state.position) for peer in self.network.peers.values()
+                   if peer.robot_id != self.robot_id and not peer.is_online()}
+        path = self.planner.find_path(
+            self.state.position, self.charging_station, self.reservation_table,
+            self.current_time, blocked=blocked, robot_id=self.robot_id,
+        )
+        if not path:
+            self.state.status = "WAITING"
+            return False
+        priority = self.calculate_priority()
+        if not self.reservation_table.can_reserve(self.robot_id, path, self.current_time):
+            self.state.status = "WAITING"
+            return False
+        if not self.reservation_table.reserve_path(
+                self.robot_id, path, self.current_time, priority,
+                self.current_time + self.reservation_lease):
+            self.state.status = "WAITING"
+            return False
+        self.state.set_path(path[1:])
+        return True
+
+    def begin_charging(self):
+        if self.charging_station is None or self.state.availability_state in {"GOING_TO_CHARGER", "CHARGING"}:
+            return False
+        task = self.tasks.get(self.state.current_task_id) if self.state.current_task_id is not None else None
+        carrying = bool(task and self.state.carrying_package)
+        self.state.availability_state = "GOING_TO_CHARGER"
+        self.state.online = False
+        self.release_reservation()
+        self.pending_reservations.clear()
+        if task is not None:
+            self.tasks.pop(task.task_id, None)
+            self._requeue_task_for_charging(task, carrying)
+            self.state.carrying_package = False
+            self.state.clear_task()
+        for queued in list(self.task_queue):
+            self.task_queue.remove(queued)
+            self.tasks.pop(queued.task_id, None)
+            self._requeue_task_for_charging(queued)
+        self.state.status = "MOVING"
+        if not self._plan_charger_path() and self.state.position != self.charging_station:
+            self.state.availability_state = "OFFLINE"
+            self.state.status = "OFFLINE"
+            return False
+        return True
+
+    def update_charging(self):
+        if self.charging_station is None:
+            return False
+        if self.state.position != self.charging_station:
+            if self.state.get_next_position() is None:
+                self._plan_charger_path()
+            if self.state.get_next_position() is not None:
+                self.move()
+            return False
+        self.release_reservation()
+        self.state.clear_path()
+        self.state.status = "CHARGING"
+        self.state.battery = min(self.initial_battery, self.state.battery + self.charging_rate_per_step)
+        if self.state.battery >= self.initial_battery:
+            self.state.online = True
+            self.state.availability_state = "ONLINE"
+            self.state.status = "IDLE"
+            self.broadcast_state()
+            return True
+        return False
+
+    def can_bid(self, task): return self.is_online() and task.is_available() and task.task_id not in self.tasks and task.task_id not in {t.task_id for t in self.task_queue}
+
+    def _is_movable(self):
+        return self.state.availability_state == "GOING_TO_CHARGER" or self.is_online()
 
     def _projected_position(self):
         if self.task_queue: return self.task_queue[-1].dropoff
@@ -58,26 +213,35 @@ class Robot:
         return self.state.position
 
     def calculate_bid(self, task):
-        projected = self._projected_position()
-        to_pickup = self.planner.find_path(projected, task.pickup)
-        to_dropoff = self.planner.find_path(task.pickup, task.dropoff)
-        if not to_pickup or not to_dropoff:
+        if not self.is_online():
             return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
-        route = to_pickup + to_dropoff[1:]
+        projected = self._projected_position()
+        to_pickup = [] if task.package_picked_up else self._find_path(projected, task.pickup)
+        to_dropoff = self._find_path(task.pickup if not task.package_picked_up else projected, task.dropoff)
+        if not to_dropoff or (not task.package_picked_up and not to_pickup):
+            return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+        route = to_dropoff if task.package_picked_up else to_pickup + to_dropoff[1:]
         distance = len(route) - 1
         time_cost = distance / self.robot_speed if self.robot_speed > 0 else self.invalid_bid_penalty
         congestion = self.reservation_table.count_conflicts(route, self.robot_id) * self.congestion_penalty
-        projected_battery = self.state.battery - distance
-        battery_cost = 0.0 if projected_battery >= 0 else self.invalid_bid_penalty
-        valid = projected_battery >= 0 and self.robot_speed > 0
-        return Bid(self.robot_id, task.task_id, distance, time_cost, battery_cost, congestion, task.priority * self.priority_bonus, valid=valid)
+        required_energy = self.energy_required_for_task(task)
+        battery_cost = 0.0 if self.state.battery >= required_energy else self.invalid_bid_penalty
+        workload = int(self.state.current_task_id is not None) + len(self.task_queue)
+        workload_cost = workload * self.workload_penalty
+        valid = self.state.battery >= required_energy and self.robot_speed > 0
+        return Bid(self.robot_id, task.task_id, distance, time_cost, battery_cost, congestion,
+                   task.priority * self.priority_bonus, workload_cost=workload_cost, valid=valid)
 
     def accept_task(self, task):
         if task.task_id in self.tasks or task.task_id in {t.task_id for t in self.task_queue}: return False
         if task.assigned_robot_id != self.robot_id: raise ValueError("task is assigned to another robot")
         self.tasks[task.task_id] = task
         if self.state.current_task_id is None:
-            self.state.set_task(task.task_id); task.start()
+            self.state.set_task(task.task_id)
+            self.state.carrying_package = task.package_picked_up
+            if task.package_picked_up and task.package_position is not None:
+                task.pickup = tuple(task.package_position)
+            task.start()
         else:
             self.task_queue.append(task)
         return True
@@ -135,6 +299,8 @@ class Robot:
 
     def plan_path(self):
         self.last_plan_reserved = False
+        if not self.is_online():
+            return []
         if self.state.current_task_id is None:
             return []
         task = self.tasks.get(self.state.current_task_id)
@@ -155,7 +321,7 @@ class Robot:
         for other in self.network.peers.values():
             if other.robot_id == self.robot_id:
                 continue
-            if other.state.status in {"IDLE", "WAITING"}:
+            if other.state.status in {"IDLE", "WAITING"} or not other.is_online():
                 blocked.add(tuple(other.state.position))
         blocked.discard(tuple(self.state.position))
 
@@ -270,13 +436,16 @@ class Robot:
                          "travel_cost": bid.travel_cost, "time_cost": bid.time_cost,
                          "battery_cost": bid.battery_cost, "congestion_cost": bid.congestion_cost,
                          "priority_bonus": bid.priority_bonus, "timestamp": bid.timestamp,
+                         "workload_cost": bid.workload_cost,
                          "valid": bid.valid}}
 
     def _make_task_from_payload(self, payload):
         task = self.warehouse.get_task(payload["task_id"])
         if task is None:
             task = Task(payload["task_id"], tuple(payload["pickup"]), tuple(payload["dropoff"]),
-                        payload.get("priority", 0), payload.get("created_time", 0.0), payload.get("deadline"))
+                        payload.get("priority", 0), payload.get("created_time", 0.0), payload.get("deadline"),
+                        package_picked_up=payload.get("package_picked_up", False),
+                        package_position=payload.get("package_position"))
             self.warehouse.add_task(task)
         return task
 
@@ -315,7 +484,9 @@ class Robot:
         else:
             bids = [bid for robot_id, bid in self.auction_bids.get(task_id, {}).items()
                     if self.auction_bid_rounds.get(task_id, {}).get(robot_id) == current_round]
-        peers = len(self.network.get_connected_robots(self.robot_id)) + 1
+        online_peer_ids = {robot_id for robot_id, peer in self.network.peers.items()
+                           if robot_id != self.robot_id and peer.is_online()}
+        peers = len(online_peer_ids) + 1
         if len({bid.robot_id for bid in bids}) < peers:
             return
         claimed_winners = {
@@ -328,7 +499,7 @@ class Robot:
             for claimed_task, (winner_id, claimed_round, _) in self.pending_claims.items()
             if claimed_task != task_id and claimed_round == current_round
         )
-        valid = [bid for bid in bids if bid.valid and bid.robot_id in set(self.network.peers)
+        valid = [bid for bid in bids if bid.valid and bid.robot_id in online_peer_ids | {self.robot_id}
                  and bid.robot_id not in claimed_winners]
         winner = min(valid, key=lambda bid: (bid.total_cost, bid.robot_id)) if valid else None
         if winner is None or task_id in self.claimed_auctions:
@@ -362,9 +533,10 @@ class Robot:
 
     def _reopen_unclaimed_tasks(self):
         """Re-publish deferred tasks after a peer claim has committed."""
-        if self.auction is None or not self.network.peers:
+        online_ids = [robot_id for robot_id, peer in self.network.peers.items() if peer.is_online()]
+        if self.auction is None or not online_ids:
             return
-        if self.robot_id != min(self.network.peers):
+        if self.robot_id != min(online_ids):
             return
         for task in self.warehouse.get_pending_tasks():
             if task.task_id in self.reopened_tasks or task.task_id in self.auction.claims:
@@ -439,17 +611,17 @@ class Robot:
         if self.auction is not None: self.auction.release_task(task)
         return task
     def broadcast_state(self):
-        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "velocity": self.state.velocity, "status": self.state.status}))
+        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "velocity": self.state.velocity, "battery": self.state.battery, "online": self.state.online, "availability_state": self.state.availability_state, "charging_station": self.charging_station, "status": self.state.status}))
     def receive_message(self, message):
         if message.message_type == MessageType.STATE: self.known_states[message.sender_id] = message.payload
-        elif message.message_type == MessageType.TASK_AVAILABLE and self.distributed:
+        elif message.message_type == MessageType.TASK_AVAILABLE and self.distributed and self.is_online():
             self._handle_task_available(message.payload)
         elif message.message_type == MessageType.BID and self.distributed:
             payload = message.payload
             bid_data = payload.get("bid", {})
             if bid_data:
                 fields = {k: bid_data[k] for k in ("robot_id", "task_id", "travel_cost", "time_cost",
-                    "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "valid") if k in bid_data}
+                    "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "workload_cost", "valid") if k in bid_data}
                 bid = Bid(**fields)
                 bid_round = int(payload.get("round", 0))
                 if (bid_round != self.auction_rounds.get(bid.task_id, -1)
@@ -489,11 +661,25 @@ class Robot:
             self.handle_obstacle(message.payload.get("position"), announce=False)
         elif message.message_type == MessageType.OBSTACLE_CLEARED:
             self.clear_obstacle(message.payload.get("position"))
-        elif message.message_type == MessageType.TASK_ASSIGNED and message.payload["robot_id"] == self.robot_id:
+        elif message.message_type == MessageType.TASK_ASSIGNED and message.payload["robot_id"] == self.robot_id and self.is_online():
             task = self.warehouse.get_task(message.payload["task_id"])
             if task and task.task_id not in self.tasks: self.accept_task(task)
     def update(self):
         for message in self.network.receive(self.robot_id): self.receive_message(message)
+        if self.state.availability_state in {"GOING_TO_CHARGER", "CHARGING"}:
+            self.update_charging()
+            self.broadcast_state()
+            return
+        if self.state.battery <= self.offline_battery_cutoff and self.state.online:
+            self.go_offline()
+            return
+        if self.should_divert_to_charge():
+            self.begin_charging()
+            self.broadcast_state()
+            return
+        if not self.is_online():
+            self.go_offline()
+            return
         self._expire_pending_reservations()
         if self.distributed:
             self._commit_pending_claims()
@@ -523,7 +709,7 @@ class Robot:
         self._orca_target = None
         self._orca_result = None
         self._orca_preferred_velocity = (0.0, 0.0)
-        if not self.orca_enabled:
+        if not self.is_online() or not self.orca_enabled:
             return None
         nxt = self.state.get_next_position()
         if nxt is None:
@@ -568,6 +754,8 @@ class Robot:
         return result
 
     def move(self, blocked_positions=None):
+        if not self._is_movable():
+            return False
         planned = self.state.get_next_position()
         nxt = self._orca_target if self._orca_target is not None else planned
         detour = nxt is not None and planned is not None and nxt != planned
@@ -619,21 +807,34 @@ class Robot:
         task = self.tasks.get(self.state.current_task_id) if self.state.current_task_id is not None else None
         if task is not None and self.state.position == task.pickup:
             self.state.carrying_package = True
+            task.package_picked_up = True
+            task.package_position = tuple(self.state.position)
+        elif task is not None and self.state.carrying_package:
+            task.package_position = tuple(self.state.position)
         if planned == nxt:
             self.state.path_index += 1
-        self.state.consume_battery(1)
+        self.state.consume_battery(self.battery_consumption_per_move)
         self.distance_travelled += 1.0
         self.waiting_time = 0.0
         self.blockage_waiting = 0.0
-        if detour:
+        depleted = self.state.battery <= self.offline_battery_cutoff
+        if detour and not depleted:
             # A grid side-step changes the route's adjacency. Rebuild the
             # remaining route from the new cell on the next planning state.
             self.release_reservation()
             self.state.clear_path()
             self.plan_path()
-        elif self.state.get_next_position() is not None:
+        elif self.state.get_next_position() is not None and not depleted:
             # Renew only the forward rolling horizon after each successful step.
             self._renew_reservation_window()
+        if depleted:
+            if self.state.availability_state == "GOING_TO_CHARGER" and self.state.position == self.charging_station:
+                self.state.clear_path()
+                self.state.availability_state = "CHARGING"
+                self.state.online = False
+                self.state.status = "CHARGING"
+            else:
+                self.go_offline()
         return True
 
     def _renew_reservation_window(self):
@@ -690,6 +891,32 @@ class Robot:
         battery_urgency = (self.initial_battery - self.state.battery) / self.initial_battery if self.initial_battery else 1.0
         self.last_priority = task_priority + self.waiting_time + self.distance_travelled * 0.1 + battery_urgency
         return self.last_priority
+
+    def go_offline(self):
+        """Stop this robot and return unfinished work to the auction pool."""
+        if self.state.availability_state in {"OFFLINE", "DISCHARGED"}:
+            return False
+        task_complete = self.is_task_complete()
+        self.state.online = False
+        discharged = self.state.battery <= self.offline_battery_cutoff
+        self.state.availability_state = "DISCHARGED" if discharged else "OFFLINE"
+        self.state.status = self.state.availability_state
+        self.state.update_velocity((0, 0))
+        self.release_reservation()
+        self.pending_reservations.clear()
+        self.state.clear_path()
+        if self.state.current_task_id is not None and not task_complete:
+            self.fail_current_task()
+        for task in list(self.task_queue):
+            self.task_queue.remove(task)
+            self.tasks.pop(task.task_id, None)
+            task.cancel()
+            if self.auction is not None:
+                self.auction.release_task(task)
+        self.state.availability_state = "DISCHARGED" if discharged else "OFFLINE"
+        self.state.status = self.state.availability_state
+        self.broadcast_state()
+        return True
 
     def handle_conflict(self, duration=0.1):
         self.state.status = "WAITING"

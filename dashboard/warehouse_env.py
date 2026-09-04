@@ -113,6 +113,8 @@ class WarehouseEnvironment:
 
         # Robots start at staging area above dropoff station
         start_positions = [(4, 8), (7, 8), (9, 8)]
+        start_positions = [(4, 8), (7, 8), (9, 8)]
+        charging_stations = [(4, 9), (7, 9), (9, 9)]
         self.robots = [
             Robot(
                 i + 1,
@@ -124,11 +126,14 @@ class WarehouseEnvironment:
                 battery=10_000.0,
                 distributed=True,
                 orca_enabled=True,
+                charging_station=charging_stations[i % len(charging_stations)],
             )
             for i in range(self.num_robots)
         ]
 
-        self.auction = Auction(self.network, self.robots)
+        # The dashboard submits tasks synchronously; resolve in-memory claims
+        # immediately while the normal simulator retains network latency.
+        self.auction = Auction(self.network, self.robots, claim_timeout=0.0)
         for r in self.robots:
             r.auction = self.auction
         self.simulator = Simulator(
@@ -254,7 +259,10 @@ class WarehouseEnvironment:
                 target_robot.accept_task(task)
                 target_robot.update()
         else:
-            self.auction.run_auction(task, verbose=False)
+            if any(getattr(robot, "distributed", False) for robot in self.robots):
+                self.auction.start_distributed(task)
+            else:
+                self.auction.run_auction(task, verbose=False)
             for r in self.robots:
                 r.update()
 
@@ -357,6 +365,10 @@ class WarehouseEnvironment:
                 "robot_id": r.robot_id,
                 "position": r.state.position,
                 "status": r.state.status,
+                "battery": r.state.battery,
+                "online": r.state.online,
+                "availability_state": r.state.availability_state,
+                "charging_station": r.charging_station,
                 "current_task_id": r.state.current_task_id,
                 "path": full_path,
                 "has_package": has_package,

@@ -11,12 +11,13 @@ class Bid:
     congestion_cost: float = 0.0
     priority_bonus: float = 0.0
     timestamp: float = 0.0
+    workload_cost: float = 0.0
     total_cost: float = field(init=False)
     valid: bool = True
 
     def __post_init__(self): self.calculate_total()
     def calculate_total(self):
-        self.total_cost = self.travel_cost + self.time_cost + self.battery_cost + self.congestion_cost - self.priority_bonus
+        self.total_cost = self.travel_cost + self.time_cost + self.battery_cost + self.congestion_cost + self.workload_cost - self.priority_bonus
         return self.total_cost
 
     def format(self, display_robot_id=None):

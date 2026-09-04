@@ -9,6 +9,10 @@ class Config:
     simulation_dt: float = 0.1
     robot_speed: float = 1.0
     initial_battery: float = 100.0
+    battery_consumption_per_move: float = 1.0
+    offline_battery_cutoff: float = 0.0
+    charging_rate_per_step: float = 1.0
+    workload_penalty: float = 5.0
     reservation_horizon: int = 20
     deadlock_timeout: float = 5.0
     collision_distance: float = 0.0

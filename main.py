@@ -14,7 +14,7 @@ def build_simulation(config=None):
     config = config or Config(); warehouse = Warehouse((config.grid_width, config.grid_height))
     network, reservations, metrics = Network(), ReservationTable(), Metrics()
     planner = AStarPlanner(warehouse)
-    robots = [Robot(i, (i, 0), warehouse, planner, network, reservations, config.initial_battery, config.robot_speed, config.congestion_penalty, config.priority_bonus, config.invalid_bid_penalty, config.orca_enabled, config.orca_neighbor_distance, config.orca_time_horizon, config.orca_robot_radius, config.orca_max_speed, config.distributed_auction, config.reservation_lease, config.reservation_horizon, config.obstacle_sensor_radius, config.obstacle_safety_radius) for i in range(config.num_robots)]
+    robots = [Robot(i, (i, 0), warehouse, planner, network, reservations, config.initial_battery, config.robot_speed, config.congestion_penalty, config.priority_bonus, config.invalid_bid_penalty, config.orca_enabled, config.orca_neighbor_distance, config.orca_time_horizon, config.orca_robot_radius, config.orca_max_speed, config.distributed_auction, config.reservation_lease, config.reservation_horizon, config.obstacle_sensor_radius, config.obstacle_safety_radius, config.battery_consumption_per_move, config.offline_battery_cutoff, (i, 0), config.charging_rate_per_step, config.workload_penalty) for i in range(config.num_robots)]
     auction = Auction(network, robots)
     tasks = [
         Task(0, (0, 1), (config.grid_width - 1, config.grid_height - 1), priority=1),
