@@ -64,6 +64,7 @@ def aggregate_comparisons(comparisons):
 class Metrics:
     def __init__(self):
         self.collisions = 0; self.tasks_completed = 0; self.total_distance = 0.0; self.waiting_time = 0.0; self.replanning_count = 0; self.deadlocks = 0; self.start_time = None; self.end_time = None; self.task_times = []
+        self.orca_constraints = 0; self.orca_stops = 0; self.orca_moves = 0; self.orca_velocity_deviation = 0.0; self.orca_velocity_samples = 0; self.orca_fallbacks = 0
     def start_simulation(self, now=0.0): self.start_time = now
     def end_simulation(self, now=0.0): self.end_time = now
     def record_collision(self, robot_a, robot_b): self.collisions += 1
@@ -72,12 +73,21 @@ class Metrics:
     def record_wait(self, robot, duration): self.waiting_time += duration
     def record_replan(self, robot): self.replanning_count += 1
     def record_deadlock(self, robots): self.deadlocks += 1
+    def record_orca(self, result, preferred_velocity, moved=True):
+        self.orca_constraints += result.constraints
+        if not moved:
+            self.orca_stops += 1
+        elif moved:
+            self.orca_moves += 1
+        self.orca_velocity_deviation += ((result.velocity[0] - preferred_velocity[0]) ** 2 + (result.velocity[1] - preferred_velocity[1]) ** 2) ** 0.5
+        self.orca_velocity_samples += 1
+        if result.used_fallback: self.orca_fallbacks += 1
     def get_completion_time(self): return (self.end_time - self.start_time) if self.start_time is not None and self.end_time is not None else 0.0
     def get_average_task_time(self): return sum(self.task_times) / len(self.task_times) if self.task_times else 0.0
     def get_collision_count(self): return self.collisions
     def get_summary(self):
         completion_time = self.get_completion_time()
-        return {"collisions": self.collisions, "tasks_completed": self.tasks_completed, "total_distance": self.total_distance, "waiting_time": self.waiting_time, "replanning_count": self.replanning_count, "deadlocks": self.deadlocks, "completion_time": completion_time, "throughput": self.tasks_completed / completion_time if completion_time else 0.0}
+        return {"collisions": self.collisions, "tasks_completed": self.tasks_completed, "total_distance": self.total_distance, "waiting_time": self.waiting_time, "replanning_count": self.replanning_count, "deadlocks": self.deadlocks, "completion_time": completion_time, "throughput": self.tasks_completed / completion_time if completion_time else 0.0, "orca_constraints": self.orca_constraints, "orca_stops": self.orca_stops, "orca_moves": self.orca_moves, "orca_velocity_deviation": self.orca_velocity_deviation / self.orca_velocity_samples if self.orca_velocity_samples else 0.0, "orca_fallbacks": self.orca_fallbacks}
     def to_benchmark_result(self, mode, seed, robot_count, task_count, improvement=None, waiting_time=None, replans=None):
         summary = self.get_summary()
         return BenchmarkResult(mode, seed, robot_count, task_count, summary["completion_time"], summary["throughput"], summary["collisions"], summary["deadlocks"], summary["waiting_time"] if waiting_time is None else waiting_time, summary["total_distance"], summary["replanning_count"] if replans is None else replans, improvement).to_dict()
