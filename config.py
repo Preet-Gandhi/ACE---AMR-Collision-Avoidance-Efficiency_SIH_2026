@@ -18,7 +18,6 @@ class Config:
     obstacle_sensor_radius: int = 2
     obstacle_safety_radius: int = 0
     random_seed: int = 42
-    robot_speed: float = 1.0
     congestion_penalty: float = 2.0
     priority_bonus: float = 1.0
     invalid_bid_penalty: float = 1_000_000.0

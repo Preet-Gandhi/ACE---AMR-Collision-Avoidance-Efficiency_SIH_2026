@@ -72,11 +72,32 @@ class DeadlockDetector:
                 start_time,
             )
 
-            if (
-                owner in known_ids
-                and owner != robot.robot_id
-            ):
+            if owner in known_ids and owner != robot.robot_id:
                 graph[robot.robot_id].add(owner)
+
+            # Reservations are not the only source of blocking. A parked or
+            # waiting AMR can physically occupy the requested cell after its
+            # future reservations have expired/released. Include that owner
+            # in the wait-for graph so occupancy-induced cycles are visible.
+            for other in robots:
+                if other.robot_id == robot.robot_id:
+                    continue
+                if tuple(other.state.position) == tuple(next_position):
+                    graph[robot.robot_id].add(other.robot_id)
+                    break
+
+            # Also account for a reserved head-on edge. The vertex may be
+            # free while the opposite directed edge is already claimed.
+            previous = tuple(robot.state.position)
+            edge_owner = robot.reservation_table.get_edge_owner(
+                previous, next_position, start_time
+            )
+            reverse_owner = robot.reservation_table.get_edge_owner(
+                next_position, previous, start_time
+            )
+            for edge_blocker in (edge_owner, reverse_owner):
+                if edge_blocker in known_ids and edge_blocker != robot.robot_id:
+                    graph[robot.robot_id].add(edge_blocker)
 
         return graph
 
@@ -377,10 +398,9 @@ class DeadlockDetector:
                     robot.state.current_task_id
                 ]
 
-                if robot.state.position == task.pickup:
-                    goal = task.dropoff
-                else:
-                    goal = task.pickup
+                # Preserve the task phase during recovery. A loaded robot
+                # must escape toward its delivery bay, not back to pickup.
+                goal = task.dropoff if robot.state.carrying_package else task.pickup
 
                 new_path = robot.planner.find_path(
                     robot.state.position,
@@ -388,6 +408,7 @@ class DeadlockDetector:
                     robot.reservation_table,
                     robot.current_time,
                     blocked=blocked,
+                    robot_id=robot.robot_id,
                 )
 
                 if new_path:
@@ -403,6 +424,7 @@ class DeadlockDetector:
                     )
 
                     if reserved:
+                        robot.last_plan_reserved = True
                         robot.state.set_path(
                             new_path[1:]
                         )
@@ -420,7 +442,9 @@ class DeadlockDetector:
         ):
             new_path = []
 
-        # Record the cycle after attempting recovery.
+        # Record the cycle after recovery attempt. Releasing the selected
+        # robot's reservations breaks the original wait-for cycle even if no
+        # alternate route exists immediately.
         self.resolved_cycles.add(cycle_key)
 
         return {
