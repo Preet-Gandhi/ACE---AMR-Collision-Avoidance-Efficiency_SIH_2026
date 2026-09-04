@@ -13,6 +13,7 @@ class AuctionResult:
 class Auction:
     def __init__(self, network, robots):
         self.network, self.robots, self.bids = network, list(robots), {}
+        for robot in self.robots: robot.auction = self
 
     def announce_task(self, task):
         task.status = "AUCTIONING"
@@ -20,6 +21,13 @@ class Auction:
 
     def submit_bid(self, bid): self.bids.setdefault(bid.task_id, []).append(bid)
     def collect_bids(self, task): return self.bids.get(task.task_id, [])
+
+    def release_task(self, task):
+        """Return a failed task to the pending pool and notify all peers."""
+        task.status = "PENDING"
+        task.assigned_robot_id = None
+        self.bids.pop(task.task_id, None)
+        self.network.broadcast(-1, Message(-1, MessageType.TASK_AVAILABLE, task.created_time, {"task_id": task.task_id}))
 
     def select_winner(self, bids):
         ids = {r.robot_id for r in self.robots}
