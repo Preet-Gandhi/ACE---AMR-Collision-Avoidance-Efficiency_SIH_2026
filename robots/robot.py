@@ -14,6 +14,8 @@ class Robot:
         self.distance_travelled = 0.0
         self.last_priority = 0.0
         self.wait_threshold = 5.0
+        self.blockage_waiting = 0.0
+        self.auction = None
         self.robot_speed, self.congestion_penalty, self.priority_bonus, self.invalid_bid_penalty = robot_speed, congestion_penalty, priority_bonus, invalid_bid_penalty
         network.register(self)
         self.current_time = 0
@@ -61,19 +63,48 @@ class Robot:
         elif path:
             self.state.clear_path(); self.state.status = "WAITING"
         return path
+
+    def is_path_valid(self):
+        remaining = self.state.path[self.state.path_index:]
+        return all(self.warehouse.is_walkable(position) for position in remaining)
+
+    def handle_obstacle(self, position, announce=True):
+        if self.state.current_task_id is None: return False
+        if announce:
+            self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.OBSTACLE_DETECTED, self.current_time, {"position": tuple(position)}))
+        if tuple(position) not in self.state.path[self.state.path_index:]: return True
+        self.release_reservation()
+        self.state.clear_path()
+        self.blockage_waiting = 0.0
+        if self.plan_path(): return True
+        self.state.status = "WAITING"
+        return False
+
+    def fail_current_task(self):
+        if self.state.current_task_id is None: return None
+        task = self.tasks.pop(self.state.current_task_id)
+        task.cancel()
+        self.release_reservation()
+        self.state.clear_path()
+        self.state.clear_task()
+        if self.auction is not None: self.auction.release_task(task)
+        return task
     def broadcast_state(self):
         self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "status": self.state.status}))
     def receive_message(self, message):
         if message.message_type == MessageType.STATE: self.known_states[message.sender_id] = message.payload
-        elif message.message_type == MessageType.OBSTACLE:
-            if self.state.current_task_id is not None: self.handle_blockage()
+        elif message.message_type in (MessageType.OBSTACLE, MessageType.OBSTACLE_DETECTED):
+            self.handle_obstacle(message.payload.get("position"), announce=False)
         elif message.message_type == MessageType.TASK_ASSIGNED and message.payload["robot_id"] == self.robot_id:
             task = self.warehouse.get_task(message.payload["task_id"])
             if task and task.task_id not in self.tasks: self.accept_task(task)
     def update(self):
         for message in self.network.receive(self.robot_id): self.receive_message(message)
         self.broadcast_state()
-        if self.state.current_task_id is not None and self.state.get_next_position() is None: self.plan_path()
+        if self.state.current_task_id is not None and self.state.get_next_position() is None:
+            if not self.plan_path():
+                self.blockage_waiting += 0.1
+                if self.blockage_waiting >= self.wait_threshold: self.fail_current_task()
 
     def set_time(self, timestep): self.current_time = timestep
     def move(self):
@@ -82,13 +113,17 @@ class Robot:
         if self.reservation_table.get_owner(nxt, self.current_time + 1) != self.robot_id:
             self.state.status = "WAITING"
             self.waiting_time += 0.1
+            self.blockage_waiting += 0.1
             if self.waiting_time >= self.wait_threshold:
                 self.replan()
+            if self.blockage_waiting >= self.wait_threshold and not self.is_path_valid():
+                self.fail_current_task()
             return False
         self.state.update_velocity((nxt[0] - self.state.position[0], nxt[1] - self.state.position[1]))
         self.state.update_position(nxt); self.state.path_index += 1; self.state.consume_battery(1)
         self.distance_travelled += 1.0
         self.waiting_time = 0.0
+        self.blockage_waiting = 0.0
         return True
     def is_task_complete(self):
         task = self.tasks.get(self.state.current_task_id)

@@ -22,29 +22,16 @@ class DeadlockDetector:
         known_ids = set(graph)
 
         for robot in robots:
-            path = list(
-                robot.state.path[robot.state.path_index:]
-            )
-
-            if not path:
+            if getattr(robot.state, "status", None) != "WAITING":
+                continue
+            next_position = robot.state.get_next_position()
+            if next_position is None:
                 continue
 
             start_time = getattr(robot, "current_time", 0) + 1
-
-            conflicts = robot.reservation_table.path_conflicts(
-                robot.robot_id,
-                path,
-                start_time,
-            )
-
-            for conflict in conflicts:
-                owner = conflict[-1]
-
-                if (
-                    owner in known_ids
-                    and owner != robot.robot_id
-                ):
-                    graph[robot.robot_id].add(owner)
+            owner = robot.reservation_table.get_owner(next_position, start_time)
+            if owner in known_ids and owner != robot.robot_id:
+                graph[robot.robot_id].add(owner)
 
         return graph
 
