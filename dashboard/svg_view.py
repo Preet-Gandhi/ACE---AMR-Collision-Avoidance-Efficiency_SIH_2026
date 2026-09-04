@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import html
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dashboard.snapshot import NormalizedSnapshot, RobotView, TaskView
 
 
@@ -12,10 +12,11 @@ class SvgWarehouseRenderer:
     def render_svg(
         snapshot: NormalizedSnapshot,
         cell_size: int = 56,
-        padding: int = 32,
+        padding: int = 36,
         shelves: Optional[Set[Tuple[int, int]]] = None,
         custom_obstacles: Optional[Set[Tuple[int, int]]] = None,
         dropoff_cells: Optional[List[Tuple[int, int]]] = None,
+        selected_cell: Optional[Tuple[int, int]] = None,
     ) -> str:
         width, height = snapshot.grid_size
         svg_w = width * cell_size + padding * 2
@@ -26,7 +27,6 @@ class SvgWarehouseRenderer:
         COLOR_SHELF_FILL = "#1e293b"  # Permanent steel shelf rack
         COLOR_SHELF_STROKE = "#475569"
         COLOR_SHELF_BEAM = "#334155"
-        COLOR_CUSTOM_OBS_FILL = "#7c2d12"    # Rust / amber hazard block
         COLOR_CUSTOM_OBS_STROKE = "#ea580c"  # Orange hazard border
         COLOR_DROPOFF_BG = "#064e3b"         # Green dropoff bay
         COLOR_DROPOFF_BORDER = "#10b981"
@@ -39,21 +39,37 @@ class SvgWarehouseRenderer:
         }
 
         # Segregate shelves and custom obstacles
+        shelves_set = set(snapshot.shelves) if snapshot.shelves else (set(shelves) if shelves else set())
+        custom_obs_set = (
+            set(snapshot.custom_obstacles)
+            if snapshot.custom_obstacles
+            else (set(custom_obstacles) if custom_obstacles else set())
+        )
+        dropoff_list = (
+            list(snapshot.dropoff_cells)
+            if snapshot.dropoff_cells
+            else (list(dropoff_cells) if dropoff_cells else [(5, 9), (6, 9), (7, 9), (8, 9)])
+        )
+
+        # Fallback to raw if snapshot fields were empty
         raw_snapshot = getattr(snapshot, "raw", {})
         if isinstance(raw_snapshot, dict):
-            shelves_set = set(raw_snapshot.get("shelves", []))
-            custom_obs_set = set(raw_snapshot.get("custom_obstacles", []))
-            dropoff_list = raw_snapshot.get("dropoff_cells", [(5, 9), (6, 9), (7, 9), (8, 9)])
-        else:
-            shelves_set = shelves or set()
-            custom_obs_set = custom_obstacles or set()
-            dropoff_list = dropoff_cells or [(5, 9), (6, 9), (7, 9), (8, 9)]
+            if not shelves_set and "shelves" in raw_snapshot:
+                shelves_set = set(raw_snapshot["shelves"])
+            if not custom_obs_set and "custom_obstacles" in raw_snapshot:
+                custom_obs_set = set(raw_snapshot["custom_obstacles"])
+            if not dropoff_list and "dropoff_cells" in raw_snapshot:
+                dropoff_list = list(raw_snapshot["dropoff_cells"])
 
-        # Fallback if raw was empty
         if not shelves_set and not custom_obs_set:
             shelves_set = set(snapshot.obstacles)
 
+        # Custom obstacles take precedence over racks
+        shelves_set = shelves_set - custom_obs_set
         dropoff_set = set(dropoff_list)
+
+        # Selected cell for reticle target
+        target_cell = selected_cell or getattr(snapshot, "selected_cell", None)
 
         # Identify conflicts
         conflict_cells: Set[Tuple[int, int]] = set()
@@ -72,8 +88,9 @@ class SvgWarehouseRenderer:
 
         svg = [
             f'<svg viewBox="0 0 {svg_w} {svg_h}" width="100%" height="auto" '
+            f'preserveAspectRatio="xMidYMid meet" '
             f'xmlns="http://www.w3.org/2000/svg" '
-            f'style="background:{COLOR_BG}; border-radius:10px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; user-select:none;">',
+            f'style="background:{COLOR_BG}; border-radius:10px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; user-select:none; display:block; margin:auto;">',
             '<defs>',
             '  <marker id="path-arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">',
             '    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />',
@@ -86,17 +103,43 @@ class SvgWarehouseRenderer:
             '    <feGaussianBlur stdDeviation="3" result="blur" />',
             '    <feComposite in="SourceGraphic" in2="blur" operator="over" />',
             '  </filter>',
+            '  <filter id="reticle-glow" x="-20%" y="-20%" width="140%" height="140%">',
+            '    <feGaussianBlur stdDeviation="2" result="blur" />',
+            '    <feComposite in="SourceGraphic" in2="blur" operator="over" />',
+            '  </filter>',
             '</defs>',
         ]
 
-        # 1. Base Grid, Shelves, Dropoff Station, and Custom Obstacles
+        # 1. Coordinate Rulers (Top X labels and Left Y labels)
+        for x in range(width):
+            cx = padding + x * cell_size + cell_size / 2
+            svg.append(
+                f'<text x="{cx}" y="{padding - 12}" fill="#64748b" font-size="11" font-weight="600" text-anchor="middle">X={x}</text>'
+            )
+
+        for y in range(height):
+            cy = padding + y * cell_size + cell_size / 2 + 4
+            svg.append(
+                f'<text x="{padding - 12}" y="{cy}" fill="#64748b" font-size="11" font-weight="600" text-anchor="end">Y={y}</text>'
+            )
+
+        # 2. Base Grid, Shelves, Dropoff Station, and Custom Obstacles
         for y in range(height):
             for x in range(width):
                 rx = padding + x * cell_size
                 ry = padding + y * cell_size
                 pos = (x, y)
 
-                if pos in dropoff_set:
+                if pos in custom_obs_set:
+                    # User-placed Dynamic Custom Obstacle (ALWAYS rendered as obstacle, never rack)
+                    svg.append(
+                        f'<rect x="{rx+2}" y="{ry+2}" width="{cell_size-4}" height="{cell_size-4}" '
+                        f'rx="4" fill="url(#hazard-stripes)" stroke="{COLOR_CUSTOM_OBS_STROKE}" stroke-width="2" />'
+                    )
+                    svg.append(
+                        f'<text x="{rx + cell_size/2}" y="{ry + cell_size/2 + 4}" fill="#ffffff" font-size="12" font-weight="bold" text-anchor="middle">⚠️</text>'
+                    )
+                elif pos in dropoff_set:
                     # Common Dropoff Bay Cell
                     svg.append(
                         f'<rect x="{rx}" y="{ry}" width="{cell_size}" height="{cell_size}" '
@@ -108,22 +151,12 @@ class SvgWarehouseRenderer:
                         f'<rect x="{rx+2}" y="{ry+2}" width="{cell_size-4}" height="{cell_size-4}" '
                         f'rx="3" fill="{COLOR_SHELF_FILL}" stroke="{COLOR_SHELF_STROKE}" stroke-width="1.5" />'
                     )
-                    # Shelf beam dividers
                     mid_y = ry + cell_size / 2
                     svg.append(
                         f'<line x1="{rx+4}" y1="{mid_y}" x2="{rx+cell_size-4}" y2="{mid_y}" stroke="{COLOR_SHELF_BEAM}" stroke-width="2" />'
                     )
                     svg.append(
                         f'<text x="{rx + cell_size/2}" y="{ry + cell_size/2 - 4}" fill="#475569" font-size="9" font-weight="bold" text-anchor="middle">RACK</text>'
-                    )
-                elif pos in custom_obs_set:
-                    # User-placed Dynamic Custom Obstacle (██)
-                    svg.append(
-                        f'<rect x="{rx+2}" y="{ry+2}" width="{cell_size-4}" height="{cell_size-4}" '
-                        f'rx="4" fill="url(#hazard-stripes)" stroke="{COLOR_CUSTOM_OBS_STROKE}" stroke-width="2" />'
-                    )
-                    svg.append(
-                        f'<text x="{rx + cell_size/2}" y="{ry + cell_size/2 + 4}" fill="#ffffff" font-size="12" font-weight="bold" text-anchor="middle">⚠️</text>'
                     )
                 elif pos in conflict_cells:
                     # Conflict Cell highlight
@@ -151,7 +184,23 @@ class SvgWarehouseRenderer:
                 f'font-size="13" font-weight="700" letter-spacing="1.5px" text-anchor="middle">⬇ DROPOFF STATION ⬇</text>'
             )
 
-        # 2. Pickups (P1, P2...) in aisles
+        # 3. Target Reticle for Selected Cell (Interactive feedback)
+        if target_cell is not None and 0 <= target_cell[0] < width and 0 <= target_cell[1] < height:
+            sx = padding + target_cell[0] * cell_size
+            sy = padding + target_cell[1] * cell_size
+            c_len = 10
+            # Reticle background tint & pulsing border
+            svg.append(
+                f'<rect x="{sx}" y="{sy}" width="{cell_size}" height="{cell_size}" '
+                f'fill="rgba(56, 189, 248, 0.15)" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 2" rx="3" filter="url(#reticle-glow)" />'
+            )
+            # Corner targeting brackets
+            svg.append(f'<path d="M {sx+2} {sy+2+c_len} L {sx+2} {sy+2} L {sx+2+c_len} {sy+2}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
+            svg.append(f'<path d="M {sx+cell_size-2-c_len} {sy+2} L {sx+cell_size-2} {sy+2} L {sx+cell_size-2} {sy+2+c_len}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
+            svg.append(f'<path d="M {sx+2} {sy+cell_size-2-c_len} L {sx+2} {sy+cell_size-2} L {sx+2+c_len} {sy+cell_size-2}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
+            svg.append(f'<path d="M {sx+cell_size-2-c_len} {sy+cell_size-2} L {sx+cell_size-2} {sy+cell_size-2} L {sx+cell_size-2} {sy+cell_size-2-c_len}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
+
+        # 4. Pickups (P1, P2...) in aisles
         for (px, py), p_lbl in pickups.items():
             cx = padding + px * cell_size + cell_size / 2
             cy = padding + py * cell_size + cell_size / 2
@@ -163,7 +212,7 @@ class SvgWarehouseRenderer:
                 f'<text x="{cx}" y="{cy + 5}" fill="#bfdbfe" font-size="11" font-weight="bold" text-anchor="middle">{p_lbl}</text>'
             )
 
-        # 3. Real Planned Paths (Subtle trail underneath robots)
+        # 5. Real Planned Paths (Trail underneath robots)
         for r in snapshot.robots:
             r_path = r.path
             if len(r_path) >= 1:
@@ -181,7 +230,7 @@ class SvgWarehouseRenderer:
                         f'stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#path-arrow)" opacity="0.75" />'
                     )
 
-        # 4. Animated AMRs (Moving smoothly along their real paths)
+        # 6. Animated AMRs (Moving smoothly along their real paths)
         for r in snapshot.robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
             st = r.status.upper() if r.status else "UNKNOWN"
@@ -198,21 +247,25 @@ class SvgWarehouseRenderer:
 
             r_radius = 16
 
+            # Check package and task stage
+            has_pkg = getattr(r, "has_package", False)
+            stage = getattr(r, "task_stage", "IDLE")
+
             # Real planned path traversal
             full_pts = [r.position] + [p for p in r.path if p != r.position]
-            if len(full_pts) >= 2 and st != "WAITING":
+            if len(full_pts) >= 2 and st == "MOVING":
                 d_cmds = [f"M {padding + full_pts[0][0]*cell_size + cell_size/2} {padding + full_pts[0][1]*cell_size + cell_size/2}"]
                 for pt in full_pts[1:]:
                     d_cmds.append(f"L {padding + pt[0]*cell_size + cell_size/2} {padding + pt[1]*cell_size + cell_size/2}")
                 path_d = " ".join(d_cmds)
 
-                # Duration based on actual path length (approx 1.2s per waypoint)
-                duration = max(3.0, len(full_pts) * 1.2)
+                # Duration based on actual path length (approx 1.0s per waypoint)
+                duration = max(2.0, len(full_pts) * 1.0)
 
                 svg.append('<g>')
                 svg.append(
-                    f'  <animateMotion dur="{duration:.1f}s" repeatCount="indefinite" path="{path_d}" '
-                    f'calcMode="linear" keyTimes="0; 0.8; 1" keyPoints="0; 1; 1" />'
+                    f'  <animateMotion dur="{duration:.1f}s" repeatCount="1" fill="freeze" path="{path_d}" '
+                    f'calcMode="linear" />'
                 )
                 if is_conflicted:
                     svg.append(
@@ -224,9 +277,13 @@ class SvgWarehouseRenderer:
                 svg.append(
                     f'  <text x="0" y="4.5" fill="#ffffff" font-size="11" font-weight="bold" text-anchor="middle">{html.escape(r_id)}</text>'
                 )
+                # Package box indicator when transporting
+                if has_pkg:
+                    svg.append('  <rect x="6" y="-18" width="14" height="14" rx="2" fill="#f59e0b" stroke="#b45309" stroke-width="1.5" />')
+                    svg.append('  <text x="13" y="-7" fill="#78350f" font-size="9" font-weight="bold" text-anchor="middle">📦</text>')
                 svg.append('</g>')
             else:
-                # Stationary robot (WAITING, IDLE, or end of path)
+                # Stationary robot (WAITING, IDLE, CONFLICT, or at destination)
                 cx = padding + r.position[0] * cell_size + cell_size / 2
                 cy = padding + r.position[1] * cell_size + cell_size / 2
 
@@ -240,6 +297,10 @@ class SvgWarehouseRenderer:
                 svg.append(
                     f'<text x="{cx}" y="{cy + 4.5}" fill="#ffffff" font-size="11" font-weight="bold" text-anchor="middle">{html.escape(r_id)}</text>'
                 )
+                # Package box indicator when at pickup/transporting
+                if has_pkg:
+                    svg.append(f'<rect x="{cx + 6}" y="{cy - 18}" width="14" height="14" rx="2" fill="#f59e0b" stroke="#b45309" stroke-width="1.5" />')
+                    svg.append(f'<text x="{cx + 13}" y="{cy - 7}" fill="#78350f" font-size="9" font-weight="bold" text-anchor="middle">📦</text>')
 
         svg.append('</svg>')
         return "\n".join(svg)

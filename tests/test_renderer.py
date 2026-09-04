@@ -260,6 +260,145 @@ class RendererTests(unittest.TestCase):
         self.assertIn("\033[", colored_output)
         self.assertIn("R1", colored_output)
 
+    # 17. Custom obstacle at (0, 0) rendered as obstacle, not rack
+    def test_custom_obstacle_at_origin_rendered_as_obstacle_not_rack(self):
+        from dashboard.svg_view import SvgWarehouseRenderer
+
+        snapshot = {
+            "grid_size": (10, 10),
+            "shelves": [(2, 2), (2, 3)],
+            "custom_obstacles": [(0, 0)],
+            "dropoff_cells": [(5, 9), (6, 9)],
+            "dropoff_station": (5, 9),
+            "robots": [],
+        }
+        normalized = normalize_snapshot(snapshot)
+        self.assertEqual(normalized.custom_obstacles, ((0, 0),))
+        self.assertEqual(normalized.shelves, ((2, 2), (2, 3)))
+
+        svg_out = SvgWarehouseRenderer.render_svg(normalized)
+        # Hazard styling must be present for (0, 0)
+        self.assertIn("url(#hazard-stripes)", svg_out)
+        self.assertIn("⚠️", svg_out)
+        # Ensure (0, 0) coordinate is labeled
+        self.assertIn("X=0", svg_out)
+        self.assertIn("Y=0", svg_out)
+
+    # 18. WarehouseEnvironment cell status check and dropoff reachability
+    def test_warehouse_env_cell_status_and_reachability(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+
+        env = WarehouseEnvironment(num_robots=2)
+
+        # (0, 0) is a valid open aisle cell
+        status_0_0, _ = env.check_cell_status((0, 0))
+        self.assertEqual(status_0_0, "AVAILABLE")
+
+        # Shelf rack
+        status_rack, _ = env.check_cell_status(env.SHELF_BLOCKS[0])
+        self.assertEqual(status_rack, "RACK")
+
+        # Dropoff station
+        status_drop, _ = env.check_cell_status(env.DROPOFF_STATION)
+        self.assertEqual(status_drop, "DROPOFF")
+
+        # Place obstacle at (0, 0)
+        success, msg = env.add_custom_obstacle((0, 0))
+        self.assertTrue(success)
+        self.assertIn((0, 0), env.custom_obstacles)
+
+        # Now (0, 0) is an existing obstacle
+        status_now, _ = env.check_cell_status((0, 0))
+        self.assertEqual(status_now, "EXISTING_OBSTACLE")
+
+        # Remove obstacle
+        removed = env.remove_custom_obstacle((0, 0))
+        self.assertTrue(removed)
+        self.assertNotIn((0, 0), env.custom_obstacles)
+
+    # 19. Rack-facing pickup locations are strictly adjacent to shelf racks
+    def test_rack_pickup_cells_adjacent_to_shelves(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+
+        env = WarehouseEnvironment(num_robots=2)
+        shelves_set = set(env.SHELF_BLOCKS)
+        dropoffs_set = set(env.DROPOFF_CELLS)
+
+        self.assertTrue(len(env.RACK_PICKUP_CELLS) > 0)
+        for px, py in env.RACK_PICKUP_CELLS:
+            self.assertNotIn((px, py), shelves_set)
+            self.assertNotIn((px, py), dropoffs_set)
+            adjacent_to_shelf = any(
+                (px + dx, py + dy) in shelves_set
+                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0))
+            )
+            self.assertTrue(adjacent_to_shelf, f"Pickup cell {(px, py)} must be adjacent to a shelf rack.")
+
+    # 20. Reset completely clears custom obstacles and restores clean environment
+    def test_warehouse_env_reset_clears_all(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+
+        env = WarehouseEnvironment(num_robots=2)
+        env.add_custom_obstacle((0, 0))
+        env.add_custom_obstacle((1, 0))
+        self.assertEqual(len(env.custom_obstacles), 2)
+
+        env.reset()
+        self.assertEqual(len(env.custom_obstacles), 0)
+        self.assertEqual(env.simulator.time, 0.0)
+
+    # 21. Real delivery cycle: pickup -> transport package -> dropoff -> complete -> idle
+    def test_delivery_cycle_pickup_transport_dropoff(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+        from dashboard.snapshot import normalize_snapshot
+        from dashboard.svg_view import SvgWarehouseRenderer
+
+        env = WarehouseEnvironment(num_robots=1)
+        pickup_pos = (2, 4)
+        env.spawn_task(pickup_pos)
+        r = env.robots[0]
+
+        # Initially heading to pickup, no package yet
+        snap_0 = env.get_snapshot()
+        norm_0 = normalize_snapshot(snap_0)
+        r_view_0 = norm_0.robots[0]
+        self.assertFalse(r_view_0.has_package)
+        self.assertEqual(r_view_0.task_stage, "GOING_TO_PICKUP")
+
+        # Step until robot reaches pickup
+        max_steps = 40
+        reached_pickup = False
+        transported = False
+        completed = False
+
+        for _ in range(max_steps):
+            env.step()
+            snap = env.get_snapshot()
+            norm = normalize_snapshot(snap)
+            r_view = norm.robots[0]
+
+            if r.state.position == pickup_pos:
+                reached_pickup = True
+                self.assertTrue(r_view.has_package)
+
+            if r_view.task_stage == "TRANSPORTING":
+                transported = True
+                self.assertTrue(r_view.has_package)
+                # Verify SVG contains package indicator 📦
+                svg_transport = SvgWarehouseRenderer.render_svg(norm)
+                self.assertIn("📦", svg_transport)
+
+            if r.state.status == "IDLE" and reached_pickup:
+                completed = True
+                self.assertFalse(r_view.has_package)
+                self.assertEqual(r_view.task_stage, "IDLE")
+                break
+
+        self.assertTrue(reached_pickup, "Robot should reach pickup.")
+        self.assertTrue(transported, "Robot should transition to TRANSPORTING.")
+        self.assertTrue(completed, "Robot should complete task at dropoff and become IDLE.")
+        self.assertEqual(env.metrics.get_summary()["tasks_completed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
