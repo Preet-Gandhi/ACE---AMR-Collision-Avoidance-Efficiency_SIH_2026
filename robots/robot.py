@@ -60,7 +60,7 @@ class Robot:
         reservation_table.register_priority(robot_id, 0)
 
     def is_online(self):
-        return self.state.online and self.state.availability_state == "ONLINE" and self.state.battery > self.offline_battery_cutoff
+        return self.state.online and self.state.availability_state in ("ONLINE", "LOW_BATTERY") and self.state.battery > self.offline_battery_cutoff
 
     def is_available_for_auction(self):
         return self.is_online()
@@ -98,8 +98,57 @@ class Robot:
             return float("inf")
         return self._path_energy(task_path) + self._path_energy(to_charger)
 
+    def get_charger_states(self):
+        """Returns a dict of {charger_pos: ('AVAILABLE' | 'RESERVED' | 'OCCUPIED', robot_id)}."""
+        stations = list(getattr(self.warehouse, "charging_stations", ()))
+        if self.charging_station and self.charging_station not in stations:
+            stations.append(self.charging_station)
+        states = {st: ("AVAILABLE", None) for st in stations}
+
+        # Check own status
+        if self.charging_station in states:
+            if self.state.position == self.charging_station or self.state.status == "CHARGING":
+                states[self.charging_station] = ("OCCUPIED", self.robot_id)
+            elif self.state.availability_state in ("GOING_TO_CHARGER", "LOW_BATTERY"):
+                states[self.charging_station] = ("RESERVED", self.robot_id)
+
+        # Check known states from peers
+        for peer_id, payload in self.known_states.items():
+            if not isinstance(payload, dict):
+                continue
+            peer_charger = payload.get("charging_station")
+            if peer_charger is not None:
+                peer_charger = tuple(peer_charger)
+                peer_pos = tuple(payload.get("position", (-1, -1)))
+                peer_st = payload.get("status", "")
+                peer_avail = payload.get("availability_state", "")
+                if peer_charger in states:
+                    if peer_pos == peer_charger or peer_st == "CHARGING":
+                        states[peer_charger] = ("OCCUPIED", peer_id)
+                    elif peer_avail == "GOING_TO_CHARGER" or peer_st == "GOING_TO_CHARGER":
+                        states[peer_charger] = ("RESERVED", peer_id)
+        return states
+
+    def select_best_charger(self):
+        """Selects the nearest AVAILABLE charger using path planning."""
+        states = self.get_charger_states()
+        candidates = []
+        for st, (state, owner) in states.items():
+            if state == "AVAILABLE" or owner == self.robot_id:
+                path = self._find_path(self.state.position, st)
+                if path:
+                    candidates.append((len(path), st))
+        if candidates:
+            return min(candidates, key=lambda c: c[0])[1]
+        return self.charging_station
+
     def should_divert_to_charge(self):
-        if self.charging_station is None or not self.is_online():
+        if not self.is_online():
+            return False
+        stations = list(getattr(self.warehouse, "charging_stations", ()))
+        if self.charging_station is None and stations:
+            self.charging_station = self.select_best_charger()
+        if self.charging_station is None:
             return False
         if self.state.current_task_id is None:
             return self.state.battery <= self.energy_required_to_charge()
@@ -157,6 +206,11 @@ class Robot:
         return True
 
     def begin_charging(self):
+        stations = list(getattr(self.warehouse, "charging_stations", ()))
+        if stations:
+            best = self.select_best_charger()
+            if best:
+                self.charging_station = best
         if self.charging_station is None or self.state.availability_state in {"GOING_TO_CHARGER", "CHARGING"}:
             return False
         task = self.tasks.get(self.state.current_task_id) if self.state.current_task_id is not None else None
@@ -175,6 +229,7 @@ class Robot:
             self.tasks.pop(queued.task_id, None)
             self._requeue_task_for_charging(queued)
         self.state.status = "MOVING"
+        self.broadcast_state()
         if not self._plan_charger_path() and self.state.position != self.charging_station:
             self.state.availability_state = "OFFLINE"
             self.state.status = "OFFLINE"
@@ -194,10 +249,12 @@ class Robot:
         self.state.clear_path()
         self.state.status = "CHARGING"
         self.state.battery = min(self.initial_battery, self.state.battery + self.charging_rate_per_step)
-        if self.state.battery >= self.initial_battery:
+        target_charge = max(self.initial_battery * 0.8, min(self.initial_battery, 1.0))
+        if self.state.battery >= target_charge:
             self.state.online = True
             self.state.availability_state = "ONLINE"
             self.state.status = "IDLE"
+            self.charging_station = None
             self.broadcast_state()
             return True
         return False
@@ -680,6 +737,8 @@ class Robot:
         if not self.is_online():
             self.go_offline()
             return
+        if self.state.battery <= 25.0 and self.state.availability_state == "ONLINE":
+            self.state.availability_state = "LOW_BATTERY"
         self._expire_pending_reservations()
         if self.distributed:
             self._commit_pending_claims()
@@ -835,6 +894,9 @@ class Robot:
                 self.state.status = "CHARGING"
             else:
                 self.go_offline()
+        elif self.state.get_next_position() is None and self.state.current_task_id is None:
+            if self.state.availability_state == "ONLINE":
+                self.state.status = "IDLE"
         return True
 
     def _renew_reservation_window(self):
@@ -866,6 +928,20 @@ class Robot:
             self.state.set_task(next_task.task_id); next_task.start()
         else:
             self.state.clear_task()
+            self._vacate_dropoff_bay()
+
+    def _vacate_dropoff_bay(self):
+        cells = set(getattr(self.warehouse, "dropoff_cells", ()))
+        if tuple(self.state.position) not in cells:
+            return
+        occupied = {tuple(other.state.position) for other in self.network.peers.values() if other.robot_id != self.robot_id}
+        for n in self.warehouse.get_neighbors(self.state.position):
+            n = tuple(n)
+            if n not in cells and n not in occupied and self.warehouse.is_walkable(n):
+                if self.reservation_table.reserve(self.robot_id, n, int(self.current_time) + 1):
+                    self.state.set_path([n])
+                    self.state.status = "MOVING"
+                    break
     def handle_blockage(self): self.replan()
     def replan(self):
         if self.state.current_task_id is None:

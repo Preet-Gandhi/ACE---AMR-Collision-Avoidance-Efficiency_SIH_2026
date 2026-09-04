@@ -38,9 +38,9 @@ st.markdown(
     .main .block-container {
         padding-top: 0.5rem !important;
         padding-bottom: 0.5rem !important;
-        padding-left: 1.0rem !important;
-        padding-right: 1.0rem !important;
-        max-width: 1440px;
+        padding-left: 0.8rem !important;
+        padding-right: 0.8rem !important;
+        max-width: 1560px;
     }
     .header-bar {
         display: flex;
@@ -73,21 +73,6 @@ st.markdown(
     .badge-clock {
         color: #fbbf24;
         font-weight: 700;
-    }
-    .robot-card {
-        background: #111827;
-        border: 1px solid #1f2937;
-        border-radius: 6px;
-        padding: 6px 10px;
-        font-size: 11px;
-    }
-    .robot-title {
-        font-weight: 700;
-        font-size: 12px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 3px;
     }
     .kpi-card {
         background: #111827;
@@ -136,7 +121,7 @@ st.markdown(
         display: flex;
         justify-content: center;
         align-items: center;
-        gap: 12px;
+        gap: 10px;
         font-size: 11px;
         color: #94a3b8;
         margin-top: 2px;
@@ -146,7 +131,31 @@ st.markdown(
     .legend-item {
         display: inline-flex;
         align-items: center;
-        gap: 5px;
+        gap: 4px;
+    }
+    .robot-card {
+        background: #111827;
+        border: 1px solid #1f2937;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 11px;
+        margin-bottom: 4px;
+    }
+    .robot-title {
+        font-weight: 700;
+        font-size: 11px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 2px;
+    }
+    .benchmark-card {
+        background: #111827;
+        border: 1px solid #1f2937;
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-top: 8px;
+        margin-bottom: 4px;
     }
     .control-panel {
         background: #111827;
@@ -166,13 +175,17 @@ st.markdown(
         gap: 6px;
     }
     .stButton > button {
-        padding: 3px 8px !important;
-        min-height: 28px !important;
+        padding: 3px 6px !important;
+        min-height: 26px !important;
         font-size: 11px !important;
     }
     div[data-testid="stNumberInput"] input {
         padding: 2px 6px !important;
-        font-size: 12px !important;
+        font-size: 11px !important;
+    }
+    div[data-testid="stSelectbox"] select {
+        padding: 2px 6px !important;
+        font-size: 11px !important;
     }
     .status-badge {
         display: inline-block;
@@ -187,6 +200,7 @@ st.markdown(
     .status-rack { background: #1f2937; color: #94a3b8; border: 1px solid #374151; }
     .status-obstacle { background: #7c2d12; color: #fb923c; border: 1px solid #ea580c; }
     .status-dropoff { background: #064e3b; color: #a7f3d0; border: 1px solid #10b981; }
+    .status-charger { background: #1e3a8a; color: #93c5fd; border: 1px solid #3b82f6; }
     .status-blocked { background: #7f1d1d; color: #f87171; border: 1px solid #dc2626; }
     .chip-container {
         display: flex;
@@ -208,30 +222,64 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize simulation environment in session state
+# Configuration presets
+PRESET_DIMS = {
+    "14x10 (Default)": (14, 10),
+    "15x9": (15, 9),
+    "20x12": (20, 12),
+    "30x20": (30, 20),
+    "40x40": (40, 40),
+}
+
+# Session State Initialization
+if "cfg_dim" not in st.session_state:
+    st.session_state["cfg_dim"] = "14x10 (Default)"
+if "cfg_robots" not in st.session_state:
+    st.session_state["cfg_robots"] = 3
+if "cfg_packages" not in st.session_state:
+    st.session_state["cfg_packages"] = 3
+if "cfg_aisle_w" not in st.session_state:
+    st.session_state["cfg_aisle_w"] = 2
+if "cfg_drop_dist" not in st.session_state:
+    st.session_state["cfg_drop_dist"] = 1
+if "cfg_battery" not in st.session_state:
+    st.session_state["cfg_battery"] = 100
+
 if "warehouse_env" not in st.session_state:
-    env = WarehouseEnvironment(num_robots=3)
-    env.generate_scenario()
+    w, h = PRESET_DIMS[st.session_state["cfg_dim"]]
+    init_bat = float(st.session_state["cfg_battery"]) * 100.0
+    env = WarehouseEnvironment(
+        num_robots=st.session_state["cfg_robots"],
+        width=w,
+        height=h,
+        aisle_width=st.session_state["cfg_aisle_w"],
+        dropoff_distance=st.session_state["cfg_drop_dist"],
+        initial_battery=init_bat,
+    )
+    env.generate_scenario(
+        min_tasks=st.session_state["cfg_packages"],
+        max_tasks=st.session_state["cfg_packages"],
+    )
     st.session_state["warehouse_env"] = env
 
 env: WarehouseEnvironment = st.session_state["warehouse_env"]
 
-# Track selected coordinates for obstacle interaction
 if "sel_x" not in st.session_state:
     st.session_state["sel_x"] = 0
 if "sel_y" not in st.session_state:
     st.session_state["sel_y"] = 0
-
-# Track play mode
 if "play_mode" not in st.session_state:
     st.session_state["play_mode"] = "LOOP"
+
+# Clamp selected coordinate to valid bounds
+st.session_state["sel_x"] = max(0, min(env.width - 1, int(st.session_state["sel_x"])))
+st.session_state["sel_y"] = max(0, min(env.height - 1, int(st.session_state["sel_y"])))
 
 # -------------------------------------------------------------
 # TWO-COLUMN LAYOUT: HERO (LEFT) + CONTROL PANEL (RIGHT)
 # -------------------------------------------------------------
-col_main, col_panel = st.columns([3.1, 1.1], gap="medium")
+col_main, col_panel = st.columns([3.2, 1.0], gap="small")
 
-# Clock mode step triggers
 step_1_clicked = False
 step_10_clicked = False
 
@@ -248,7 +296,6 @@ with col_panel:
         index=mode_index,
         horizontal=True,
         label_visibility="collapsed",
-        help="LOOP: continuous dynamic scenario execution. CLOCK: frozen state for manual inspection and stepping.",
     )
     is_loop_mode = (selected_mode == "LOOP")
     st.session_state["play_mode"] = "LOOP" if is_loop_mode else "CLOCK"
@@ -258,17 +305,17 @@ with col_panel:
             "Tick Delay",
             min_value=0.05,
             max_value=1.0,
-            value=0.3,
+            value=0.25,
             step=0.05,
             format="%.2fs",
         )
         st.markdown(
-            "<div style='font-size:11px; color:#34d399; margin-top:-6px; margin-bottom:8px;'>● Continuous Loop Active</div>",
+            "<div style='font-size:10px; color:#34d399; margin-top:-6px; margin-bottom:6px;'>● Continuous Loop Active</div>",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            "<div style='font-size:11px; color:#fbbf24; margin-bottom:6px;'>⏸ State Frozen (Clock Mode)</div>",
+            "<div style='font-size:10px; color:#fbbf24; margin-bottom:4px;'>⏸ State Frozen (Clock Mode)</div>",
             unsafe_allow_html=True,
         )
         col_s1, col_s2 = st.columns(2)
@@ -279,39 +326,90 @@ with col_panel:
             if st.button("⏩ Step 10", use_container_width=True):
                 step_10_clicked = True
 
-    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:8px 0;'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:6px 0;'>", unsafe_allow_html=True)
 
-    # 2. Dynamic Scenarios
-    if st.button("🎲 New Scenario", use_container_width=True):
-        env.generate_scenario()
-        st.rerun()
+    # 2. Dynamic Scenario Generator
+    col_sc1, col_sc2 = st.columns([1.6, 1.0])
+    with col_sc1:
+        if st.button("🎲 New Scenario", use_container_width=True):
+            env.generate_scenario(
+                min_tasks=st.session_state["cfg_packages"],
+                max_tasks=st.session_state["cfg_packages"],
+            )
+            st.rerun()
+    with col_sc2:
+        active_cnt = len([t for t in env.warehouse.tasks.values() if not t.is_finished()])
+        st.markdown(
+            f"<div style='font-size:10px; color:#94a3b8; text-align:right; padding-top:4px;'><b style='color:#38bdf8;'>{active_cnt} active</b></div>",
+            unsafe_allow_html=True,
+        )
 
-    active_tasks = [t for t in env.warehouse.tasks.values() if not t.is_finished()]
-    st.markdown(
-        f"<div style='font-size:11px; color:#94a3b8; margin-top:2px;'>Active Tasks: <b style='color:#38bdf8;'>{len(active_tasks)} pending</b></div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:6px 0;'>", unsafe_allow_html=True)
 
-    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:8px 0;'>", unsafe_allow_html=True)
+    # 3. Warehouse Geometry & Scale Settings (Collapsible or compact)
+    with st.expander("🏗️ WAREHOUSE CONFIG", expanded=False):
+        chosen_dim = st.selectbox(
+            "Dimensions",
+            options=list(PRESET_DIMS.keys()),
+            index=list(PRESET_DIMS.keys()).index(st.session_state["cfg_dim"]),
+        )
+        c_p1, c_p2 = st.columns(2)
+        with c_p1:
+            num_r = st.number_input("Robots (N)", min_value=1, max_value=20, value=int(st.session_state["cfg_robots"]), step=1)
+        with c_p2:
+            num_p = st.number_input("Packages (M)", min_value=1, max_value=10, value=int(st.session_state["cfg_packages"]), step=1)
 
-    # 3. Matrix Coordinate Controls (Obstacles & Tasks)
-    st.markdown("<div style='font-size:11px; font-weight:700; color:#e2e8f0; margin-bottom:4px;'>🎯 COORDINATE CONTROLS</div>", unsafe_allow_html=True)
+        c_p3, c_p4 = st.columns(2)
+        with c_p3:
+            aw = st.number_input("Aisle Width", min_value=1, max_value=3, value=int(st.session_state["cfg_aisle_w"]), step=1)
+        with c_p4:
+            dd = st.number_input("Dropoff Dist", min_value=1, max_value=4, value=int(st.session_state["cfg_drop_dist"]), step=1)
+
+        bat_pct = st.slider("Start Battery %", min_value=10, max_value=100, value=int(st.session_state["cfg_battery"]), step=10)
+
+        if st.button("Apply Layout", use_container_width=True, type="primary"):
+            st.session_state["cfg_dim"] = chosen_dim
+            st.session_state["cfg_robots"] = num_r
+            st.session_state["cfg_packages"] = num_p
+            st.session_state["cfg_aisle_w"] = aw
+            st.session_state["cfg_drop_dist"] = dd
+            st.session_state["cfg_battery"] = bat_pct
+
+            w, h = PRESET_DIMS[chosen_dim]
+            env = WarehouseEnvironment(
+                num_robots=num_r,
+                width=w,
+                height=h,
+                aisle_width=aw,
+                dropoff_distance=dd,
+                initial_battery=float(bat_pct) * 100.0,
+            )
+            env.generate_scenario(min_tasks=num_p, max_tasks=num_p)
+            st.session_state["warehouse_env"] = env
+            st.session_state["sel_x"] = 0
+            st.session_state["sel_y"] = 0
+            st.rerun()
+
+    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:6px 0;'>", unsafe_allow_html=True)
+
+    # 4. Matrix Coordinate Controls & Keyboard Reticle
+    st.markdown("<div style='font-size:11px; font-weight:700; color:#e2e8f0; margin-bottom:2px;'>🎯 RETICLE & COORDINATES</div>", unsafe_allow_html=True)
 
     c_x, c_y = st.columns(2)
     with c_x:
         sel_x = st.number_input(
-            "X (0-13)",
+            f"X (0-{env.width - 1})",
             min_value=0,
-            max_value=env.WIDTH - 1,
+            max_value=env.width - 1,
             value=int(st.session_state["sel_x"]),
             step=1,
             key="side_num_x",
         )
     with c_y:
         sel_y = st.number_input(
-            "Y (0-9)",
+            f"Y (0-{env.height - 1})",
             min_value=0,
-            max_value=env.HEIGHT - 1,
+            max_value=env.height - 1,
             value=int(st.session_state["sel_y"]),
             step=1,
             key="side_num_y",
@@ -321,18 +419,40 @@ with col_panel:
     st.session_state["sel_y"] = sel_y
     selected_coord = (int(sel_x), int(sel_y))
 
+    # Quick Directional Reticle D-Pad
+    dp_l, dp_u, dp_d, dp_r = st.columns(4)
+    with dp_l:
+        if st.button("⬅️", use_container_width=True):
+            st.session_state["sel_x"] = max(0, int(sel_x) - 1)
+            st.rerun()
+    with dp_u:
+        if st.button("⬆️", use_container_width=True):
+            st.session_state["sel_y"] = max(0, int(sel_y) - 1)
+            st.rerun()
+    with dp_d:
+        if st.button("⬇️", use_container_width=True):
+            st.session_state["sel_y"] = min(env.height - 1, int(sel_y) + 1)
+            st.rerun()
+    with dp_r:
+        if st.button("➡️", use_container_width=True):
+            st.session_state["sel_x"] = min(env.width - 1, int(sel_x) + 1)
+            st.rerun()
+
     status_type, status_desc = env.check_cell_status(selected_coord)
+    if selected_coord in env.charging_stations:
+        status_type = "CHARGER"
     badge_class = {
         "AVAILABLE": "status-available",
         "RACK": "status-rack",
         "EXISTING_OBSTACLE": "status-obstacle",
         "DROPOFF": "status-dropoff",
+        "CHARGER": "status-charger",
         "WOULD_BLOCK_DROPOFF": "status-blocked",
         "OCCUPIED_BY_ROBOT": "status-blocked",
     }.get(status_type, "status-rack")
 
     st.markdown(
-        f"<div style='margin-bottom: 8px; font-size: 11px;'>"
+        f"<div style='margin-bottom: 6px; font-size: 11px;'>"
         f"<span style='color:#94a3b8;'>Cell ({selected_coord[0]}, {selected_coord[1]}):</span> "
         f"<span class='status-badge {badge_class}'>{status_type.replace('_', ' ')}</span>"
         f"</div>",
@@ -367,18 +487,21 @@ with col_panel:
     if env.custom_obstacles:
         chips_html = "".join(f"<span class='obs-chip'>({ox},{oy})</span>" for ox, oy in sorted(env.custom_obstacles))
         st.markdown(
-            f"<div style='font-size:11px; color:#94a3b8; margin-top:6px;'>Placed:</div><div class='chip-container'>{chips_html}</div>",
+            f"<div style='font-size:10px; color:#94a3b8; margin-top:4px;'>Placed:</div><div class='chip-container'>{chips_html}</div>",
             unsafe_allow_html=True,
         )
 
-    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:8px 0;'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border:0; border-top:1px solid #1f2937; margin:6px 0;'>", unsafe_allow_html=True)
 
-    # 4. Reset All
+    # 5. Reset All
     if st.button("🔄 Reset All", use_container_width=True, type="secondary"):
         env.reset()
         st.session_state["sel_x"] = 0
         st.session_state["sel_y"] = 0
-        env.generate_scenario()
+        env.generate_scenario(
+            min_tasks=st.session_state["cfg_packages"],
+            max_tasks=st.session_state["cfg_packages"],
+        )
         st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -390,13 +513,19 @@ if not is_loop_mode:
     if step_1_clicked:
         env.step()
         if env.is_scenario_finished():
-            env.generate_scenario()
+            env.generate_scenario(
+                min_tasks=st.session_state["cfg_packages"],
+                max_tasks=st.session_state["cfg_packages"],
+            )
         st.rerun()
     elif step_10_clicked:
         for _ in range(10):
             env.step()
             if env.is_scenario_finished():
-                env.generate_scenario()
+                env.generate_scenario(
+                    min_tasks=st.session_state["cfg_packages"],
+                    max_tasks=st.session_state["cfg_packages"],
+                )
                 break
         st.rerun()
 
@@ -422,14 +551,14 @@ with col_main:
     st.markdown(
         f"""
         <div class='header-bar'>
-            <div class='header-title'>ACE — AMR Collision Avoidance</div>
-            <div class='header-badge'>SIM TIME: {sim_time:.1f}s | STEP: {sim_step} | {mode_badge_html}</div>
+            <div class='header-title'>ACE — AMR Collision Avoidance & Warehouse Optimization</div>
+            <div class='header-badge'>DIM: {env.width}x{env.height} | TIME: {sim_time:.1f}s | STEP: {sim_step} | {mode_badge_html}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # 2. Exactly Four Aligned KPI Cards
+    # 2. Exactly Four Primary Aligned KPI Cards
     kpi_c1, kpi_c2, kpi_c3, kpi_c4 = st.columns(4)
 
     total_tasks = metrics.total_tasks or len(normalized.tasks) or len(env.warehouse.tasks) or 1
@@ -465,9 +594,9 @@ with col_main:
     st.markdown("<div class='warehouse-wrapper'>", unsafe_allow_html=True)
     svg_code = SvgWarehouseRenderer.render_svg(
         normalized,
-        shelves=set(env.SHELF_BLOCKS),
+        shelves=set(env.shelf_blocks),
         custom_obstacles=set(env.custom_obstacles),
-        dropoff_cells=env.DROPOFF_CELLS,
+        dropoff_cells=env.dropoff_cells,
         selected_cell=selected_coord,
     )
     st.markdown(svg_code, unsafe_allow_html=True)
@@ -480,11 +609,13 @@ with col_main:
             <span class='legend-item'><span style='color:#10b981; font-size:14px;'>●</span> Moving</span>
             <span class='legend-item'><span style='color:#f59e0b; font-size:14px;'>●</span> Waiting</span>
             <span class='legend-item'><span style='color:#ef4444; font-size:14px;'>●</span> Conflict</span>
+            <span class='legend-item'><span style='color:#3b82f6; font-size:14px;'>●</span> Charging</span>
             <span class='legend-item'><span style='color:#94a3b8; font-size:14px;'>●</span> Idle</span>
             <span style='color:#334155;'>|</span>
-            <span class='legend-item'><span style='background:#1e3a8a; border:1px solid #3b82f6; border-radius:3px; padding:1px 5px; font-size:10px; color:#bfdbfe; font-weight:bold;'>P</span> Rack Pickup</span>
-            <span class='legend-item'><span style='background:#064e3b; border:1px solid #10b981; border-radius:3px; padding:1px 5px; font-size:10px; color:#a7f3d0; font-weight:bold;'>D</span> Active Dropoff</span>
-            <span class='legend-item'><span style='background:#1e293b; border:1px solid #475569; border-radius:3px; padding:1px 6px; font-size:10px; color:#94a3b8;'>RACK</span> Shelf</span>
+            <span class='legend-item'><span style='background:#1e3a8a; border:1px solid #3b82f6; border-radius:3px; padding:1px 5px; font-size:10px; color:#bfdbfe; font-weight:bold;'>P</span> Pickup</span>
+            <span class='legend-item'><span style='background:#064e3b; border:1px solid #10b981; border-radius:3px; padding:1px 5px; font-size:10px; color:#a7f3d0; font-weight:bold;'>D</span> Dropoff</span>
+            <span class='legend-item'><span style='border:1px solid #38bdf8; border-radius:3px; padding:1px 5px; font-size:10px; color:#38bdf8;'>⚡</span> Charger</span>
+            <span class='legend-item'><span style='background:#1e293b; border:1px solid #475569; border-radius:3px; padding:1px 5px; font-size:10px; color:#94a3b8;'>RACK</span></span>
             <span class='legend-item'><span style='background:#7c2d12; border:1px solid #ea580c; border-radius:3px; padding:1px 5px; font-size:10px; color:#ffffff;'>⚠️</span> Obstacle</span>
             <span class='legend-item'><span style='border:1.5px dashed #38bdf8; border-radius:3px; padding:1px 5px; font-size:10px; color:#38bdf8;'>⛶</span> Reticle</span>
         </div>
@@ -494,18 +625,24 @@ with col_main:
 
     # 5. Robot Status Cards
     ROBOT_PATH_COLORS = ["#38bdf8", "#c084fc", "#34d399", "#fbbf24", "#f472b6"]
-    r_cols = st.columns(len(normalized.robots))
-    for idx, (col, r) in enumerate(zip(r_cols, normalized.robots)):
+    num_r_cards = len(normalized.robots)
+    r_cols = st.columns(min(6, num_r_cards)) if num_r_cards > 0 else []
+    for idx, r in enumerate(normalized.robots):
+        col = r_cols[idx % len(r_cols)]
         color = ROBOT_PATH_COLORS[idx % len(ROBOT_PATH_COLORS)]
+        st_upper = (r.availability_state if r.availability_state not in {"", "UNKNOWN"} else r.status).upper()
         st_color = {
             "MOVING": "#10b981",
             "WAITING": "#f59e0b",
             "CONFLICT": "#ef4444",
+            "CHARGING": "#3b82f6",
+            "LOW_BATTERY": "#ef4444",
             "IDLE": "#94a3b8",
-        }.get(r.status.upper(), "#94a3b8")
+        }.get(st_upper, "#94a3b8")
 
         pkg_badge = "📦 Loaded" if r.has_package else "⚪ Empty"
         stage_str = r.task_stage.replace("_", " ")
+        bat_display = f"{r.battery:.0f}" if r.battery < 1000 else f"{min(100.0, (r.battery / 10000.0) * 100.0):.0f}%"
 
         with col:
             st.markdown(
@@ -513,18 +650,48 @@ with col_main:
                 <div class='robot-card'>
                     <div class='robot-title'>
                         <span style='color:{color}; font-weight:bold;'>AMR {r.robot_id}</span>
-                        <span style='color:{st_color}; font-size:11px; font-weight:bold;'>● {r.status}</span>
+                        <span style='color:{st_color}; font-size:10px; font-weight:bold;'>● {st_upper}</span>
                     </div>
-                    <div style='color:#94a3b8; font-size:11px; margin-bottom:2px;'>
-                        Pos: <span style='color:#e2e8f0; font-family:ui-monospace,monospace;'>({r.position[0]}, {r.position[1]})</span> | {pkg_badge}
+                    <div style='color:#94a3b8; font-size:10px; margin-bottom:1px;'>
+                        Pos: ({r.position[0]}, {r.position[1]}) | Bat: {bat_display}
                     </div>
-                    <div style='color:#94a3b8; font-size:11px;'>
-                        Stage: <span style='color:#38bdf8; font-weight:600;'>{stage_str}</span>
+                    <div style='color:#94a3b8; font-size:10px;'>
+                        {pkg_badge} | {stage_str}
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+
+    # 6. ACE vs Baseline Performance Comparison Card
+    comp = normalized.comparison
+    if comp is not None:
+        ace_t = comp.ace_time
+        base_t = comp.baseline_time
+        imp = comp.improvement_percentage
+        imp_color = "#10b981" if imp >= 0 else "#ef4444"
+        imp_sign = "+" if imp >= 0 else ""
+
+        st.markdown(
+            f"""
+            <div class='benchmark-card'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <div style='font-size:12px; font-weight:700; color:#e2e8f0;'>
+                        ⚡ ACE vs Stop-and-Wait Baseline Benchmark (Scenario #{comp.scenario_id})
+                    </div>
+                    <div style='font-size:13px; font-weight:800; color:{imp_color}; font-family:ui-monospace,monospace;'>
+                        {imp_sign}{imp:.1f}% FASTER
+                    </div>
+                </div>
+                <div style='display:flex; gap:16px; margin-top:6px; font-size:11px; color:#94a3b8;'>
+                    <div>ACE Completion: <b style='color:#38bdf8;'>{ace_t:.2f}s</b> (0 coll)</div>
+                    <div>Baseline Completion: <b style='color:#f59e0b;'>{base_t:.2f}s</b> ({comp.baseline_collisions} coll)</div>
+                    <div>Improvement: <b style='color:{imp_color};'>{imp_sign}{imp:.1f}%</b></div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 # -------------------------------------------------------------
 # CONTINUOUS LOOP EXECUTION
@@ -533,5 +700,8 @@ if is_loop_mode:
     time.sleep(tick_speed)
     env.step()
     if env.is_scenario_finished():
-        env.generate_scenario()
+        env.generate_scenario(
+            min_tasks=st.session_state["cfg_packages"],
+            max_tasks=st.session_state["cfg_packages"],
+        )
     st.rerun()
