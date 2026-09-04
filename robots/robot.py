@@ -1,11 +1,12 @@
 from auction.bid import Bid
+from auction.task import Task
 from communication.message import Message, MessageType
 from planning.orca import ORCAAgent, ORCASolver
 from robots.state import RobotState
 
 
 class Robot:
-    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0):
+    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0, distributed=False, reservation_lease=20):
         self.robot_id, self.warehouse, self.planner = robot_id, warehouse, planner
         self.network, self.reservation_table = network, reservation_table
         self.state, self.known_states, self.tasks = RobotState(robot_id, tuple(start_position), battery=battery), {}, {}
@@ -18,6 +19,15 @@ class Robot:
         self.blockage_waiting = 0.0
         self.replan_count = 0
         self.auction = None
+        self.distributed = distributed
+        self.reservation_lease = reservation_lease
+        self.auction_rounds = {}
+        self.auction_bids = {}
+        self.auction_bid_rounds = {}
+        self.claimed_auctions = set()
+        self.pending_claims = {}
+        self.plan_version = 0
+        self.reservation_leases = {}
         self.robot_speed, self.congestion_penalty, self.priority_bonus, self.invalid_bid_penalty = robot_speed, congestion_penalty, priority_bonus, invalid_bid_penalty
         self.orca_enabled = orca_enabled
         self.orca_robot_radius = orca_robot_radius
@@ -89,11 +99,121 @@ class Robot:
         path = self.planner.find_path(self.state.position, goal, self.reservation_table, self.current_time)
         priority = self.calculate_priority()
         self.last_priority = priority
-        if path and self.reservation_table.reserve_path(self.robot_id, path, self.current_time, priority):
+        if path and self.distributed:
+            self._request_reservation(path, priority)
+        reservable = path and self.reservation_table.can_reserve(self.robot_id, path, self.current_time)
+        if reservable and self.reservation_table.reserve_path(self.robot_id, path, self.current_time, priority):
             self.state.set_path(path[1:])
+            self.plan_version += 1
+            if self.distributed:
+                self._broadcast_reservation(MessageType.RESERVATION_GRANTED, path, priority)
         elif path:
             self.state.clear_path(); self.state.status = "WAITING"
+            if self.distributed:
+                self._broadcast_reservation(MessageType.RESERVATION_DENIED, path, priority)
         return path
+
+    def _broadcast_reservation(self, message_type, path, priority):
+        payload = {"robot_id": self.robot_id, "path": [tuple(p) for p in path],
+                   "start_time": int(self.current_time), "priority": priority,
+                   "plan_version": self.plan_version, "lease_until": int(self.current_time) + self.reservation_lease}
+        self.network.broadcast(self.robot_id, Message(self.robot_id, message_type, self.current_time, payload))
+
+    def _request_reservation(self, path, priority):
+        self._broadcast_reservation(MessageType.RESERVATION_REQUEST, path, priority)
+
+    def _bid_payload(self, bid, auction_id, round_number):
+        return {"auction_id": auction_id, "round": round_number,
+                "bid": {"robot_id": bid.robot_id, "task_id": bid.task_id,
+                         "travel_cost": bid.travel_cost, "time_cost": bid.time_cost,
+                         "battery_cost": bid.battery_cost, "congestion_cost": bid.congestion_cost,
+                         "priority_bonus": bid.priority_bonus, "timestamp": bid.timestamp,
+                         "valid": bid.valid}}
+
+    def _make_task_from_payload(self, payload):
+        task = self.warehouse.get_task(payload["task_id"])
+        if task is None:
+            task = Task(payload["task_id"], tuple(payload["pickup"]), tuple(payload["dropoff"]),
+                        payload.get("priority", 0), payload.get("created_time", 0.0), payload.get("deadline"))
+            self.warehouse.add_task(task)
+        return task
+
+    def _handle_task_available(self, payload):
+        task = self._make_task_from_payload(payload)
+        auction_id = payload.get("auction_id", f"task-{task.task_id}")
+        round_number = int(payload.get("round", 0))
+        if round_number < self.auction_rounds.get(task.task_id, -1) or not task.is_available():
+            return
+        if round_number > self.auction_rounds.get(task.task_id, -1):
+            self.auction_bids[task.task_id] = {}
+            self.auction_bid_rounds[task.task_id] = {}
+            self.claimed_auctions.discard(task.task_id)
+        self.auction_rounds[task.task_id] = round_number
+        bid = self.calculate_bid(task) if self.can_bid(task) else Bid(
+            self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+        self.auction_bids.setdefault(task.task_id, {})[self.robot_id] = bid
+        self.auction_bid_rounds.setdefault(task.task_id, {})[self.robot_id] = round_number
+        if self.auction is not None:
+            self.auction.submit_bid(bid, auction_id, round_number)
+        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.BID, self.current_time,
+            self._bid_payload(bid, auction_id, round_number) | {"task_id": task.task_id}))
+        self._resolve_distributed_auction(dict(payload, task_id=task.task_id))
+
+    def _resolve_distributed_auction(self, payload):
+        task_id = payload.get("task_id")
+        task = self.warehouse.get_task(task_id)
+        if task is None or not task.is_available():
+            return
+        round_number = int(payload.get("round", self.auction_rounds.get(task_id, 0)))
+        current_round = self.auction_rounds.get(task_id, round_number)
+        if self.auction is not None:
+            bids = list(self.auction.collect_bids(task, payload.get("auction_id"), current_round))
+        else:
+            bids = [bid for robot_id, bid in self.auction_bids.get(task_id, {}).items()
+                    if self.auction_bid_rounds.get(task_id, {}).get(robot_id) == current_round]
+        peers = len(self.network.get_connected_robots(self.robot_id)) + 1
+        if len({bid.robot_id for bid in bids}) < peers:
+            return
+        valid = [bid for bid in bids if bid.valid and bid.robot_id in set(self.network.peers)]
+        winner = min(valid, key=lambda bid: (bid.total_cost, bid.robot_id)) if valid else None
+        if winner is None or task_id in self.claimed_auctions:
+            return
+        self.claimed_auctions.add(task_id)
+        claim = {"task_id": task_id, "robot_id": winner.robot_id,
+                 "auction_id": payload.get("auction_id"), "round": round_number}
+        if self.auction is not None:
+            self.auction.claims[task_id] = (winner.robot_id, claim["auction_id"], round_number)
+        claim_timeout = getattr(self.auction, "claim_timeout", 0.3)
+        deadline = self.current_time if not self.network.get_connected_robots(self.robot_id) else self.current_time + claim_timeout
+        self.pending_claims[task_id] = (winner.robot_id, round_number, deadline)
+        if winner.robot_id == self.robot_id:
+            self.state.status = "WAITING"
+        self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.AUCTION_CLAIM, self.current_time, claim))
+        self._commit_pending_claims()
+
+    def _commit_pending_claims(self):
+        for task_id, (winner_id, round_number, deadline) in list(self.pending_claims.items()):
+            if self.current_time < deadline:
+                continue
+            task = self.warehouse.get_task(task_id)
+            if task and task.is_available() and winner_id == self.robot_id:
+                task.assign(self.robot_id)
+                self.accept_task(task)
+            self.pending_claims.pop(task_id, None)
+
+    def _handle_reservation_message(self, message):
+        payload = message.payload
+        owner = payload.get("robot_id", message.sender_id)
+        path = [tuple(p) for p in payload.get("path", [])]
+        version = int(payload.get("plan_version", 0))
+        if version < self.reservation_leases.get(owner, {}).get("plan_version", -1):
+            return
+        self.reservation_leases[owner] = {"plan_version": version, "lease_until": payload.get("lease_until", 0)}
+        if message.message_type == MessageType.RESERVATION_GRANTED and path:
+            self.reservation_table.register_priority(owner, payload.get("priority", 0))
+            self.reservation_table.reserve_path(owner, path, payload.get("start_time", self.current_time), payload.get("priority", 0))
+        elif message.message_type in (MessageType.RESERVATION_RELEASED, MessageType.RESERVATION_PREEMPTED):
+            self.reservation_table.release(owner)
 
     def is_path_valid(self):
         remaining = self.state.path[self.state.path_index:]
@@ -125,6 +245,42 @@ class Robot:
         self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.STATE, self.current_time, {"robot_id": self.robot_id, "position": self.state.position, "velocity": self.state.velocity, "status": self.state.status}))
     def receive_message(self, message):
         if message.message_type == MessageType.STATE: self.known_states[message.sender_id] = message.payload
+        elif message.message_type == MessageType.TASK_AVAILABLE and self.distributed:
+            self._handle_task_available(message.payload)
+        elif message.message_type == MessageType.BID and self.distributed:
+            payload = message.payload
+            bid_data = payload.get("bid", {})
+            if bid_data:
+                fields = {k: bid_data[k] for k in ("robot_id", "task_id", "travel_cost", "time_cost",
+                    "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "valid") if k in bid_data}
+                bid = Bid(**fields)
+                bid_round = int(payload.get("round", 0))
+                if bid_round < self.auction_rounds.get(bid.task_id, -1):
+                    return
+                self.auction_bids.setdefault(bid.task_id, {})[bid.robot_id] = bid
+                self.auction_bid_rounds.setdefault(bid.task_id, {})[bid.robot_id] = bid_round
+                if self.auction is not None: self.auction.receive_bid(message)
+            self._resolve_distributed_auction(message.payload)
+        elif message.message_type == MessageType.AUCTION_CLAIM and self.distributed:
+            if self.auction is not None: self.auction.receive_claim(message)
+            task = self.warehouse.get_task(message.payload.get("task_id"))
+            if task and task.is_available():
+                self.pending_claims[task.task_id] = (
+                    message.payload.get("robot_id"), int(message.payload.get("round", 0)),
+                    self.current_time + getattr(self.auction, "claim_timeout", 0.3))
+        elif message.message_type == MessageType.RESERVATION_REQUEST:
+            payload = message.payload
+            path = [tuple(p) for p in payload.get("path", [])]
+            owner = payload.get("robot_id", message.sender_id)
+            priority = payload.get("priority", 0)
+            allowed = bool(path) and self.reservation_table.can_reserve(
+                owner, path, payload.get("start_time", self.current_time))
+            response_type = MessageType.RESERVATION_GRANTED if allowed else MessageType.RESERVATION_DENIED
+            self.network.send(self.robot_id, message.sender_id, Message(message.sender_id, response_type,
+                self.current_time, dict(payload, responder_id=self.robot_id)))
+        elif message.message_type in (MessageType.RESERVATION_GRANTED, MessageType.RESERVATION_DENIED,
+                                      MessageType.RESERVATION_RELEASED, MessageType.RESERVATION_PREEMPTED):
+            self._handle_reservation_message(message)
         elif message.message_type in (MessageType.OBSTACLE, MessageType.OBSTACLE_DETECTED):
             self.handle_obstacle(message.payload.get("position"), announce=False)
         elif message.message_type == MessageType.TASK_ASSIGNED and message.payload["robot_id"] == self.robot_id:
@@ -132,6 +288,8 @@ class Robot:
             if task and task.task_id not in self.tasks: self.accept_task(task)
     def update(self):
         for message in self.network.receive(self.robot_id): self.receive_message(message)
+        if self.distributed:
+            self._commit_pending_claims()
         self.broadcast_state()
         if self.state.current_task_id is not None and self.state.get_next_position() is None:
             if not self.plan_path():
@@ -269,7 +427,12 @@ class Robot:
         self.state.clear_path()
         return self.plan_path()
     def request_reservation(self): return bool(self.state.path) and self.reservation_table.reserve_path(self.robot_id, self.state.path)
-    def release_reservation(self): self.reservation_table.release(self.robot_id)
+    def release_reservation(self):
+        self.reservation_table.release(self.robot_id)
+        if self.distributed:
+            self.network.broadcast(self.robot_id, Message(self.robot_id, MessageType.RESERVATION_RELEASED,
+                self.current_time, {"robot_id": self.robot_id, "plan_version": self.plan_version,
+                                     "lease_until": int(self.current_time)}))
     def detect_conflict(self):
         next_position = self._orca_target if self.orca_enabled and self._orca_result is not None else self.state.get_next_position()
         return next_position is not None and self.reservation_table.get_owner(next_position, self.current_time + 1) not in (None, self.robot_id)
