@@ -285,6 +285,11 @@ class Simulator:
 
     def spawn_task(self, task):
         self.warehouse.add_task(task)
+        if self.auction is not None:
+            if any(getattr(robot, "distributed", False) for robot in self.robots):
+                self.auction.start_distributed(task)
+            else:
+                self.auction.run_auction(task, verbose=False)
 
     def spawn_obstacle(self, position):
         self.warehouse.add_obstacle(

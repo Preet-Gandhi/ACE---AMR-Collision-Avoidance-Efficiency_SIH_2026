@@ -104,6 +104,7 @@ class WarehouseEnvironment:
                 self.network,
                 self.reservations,
                 battery=10_000.0,
+                distributed=True,
             )
             for i in range(self.num_robots)
         ]
@@ -219,7 +220,7 @@ class WarehouseEnvironment:
                 target_robot.accept_task(task)
                 target_robot.update()
         else:
-            self.auction.run_auction(task, verbose=False)
+            self.auction.start_distributed(task)
             for r in self.robots:
                 r.update()
 

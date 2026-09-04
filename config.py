@@ -13,6 +13,8 @@ class Config:
     deadlock_timeout: float = 5.0
     collision_distance: float = 0.0
     auction_interval: float = 1.0
+    distributed_auction: bool = True
+    reservation_lease: int = 20
     random_seed: int = 42
     robot_speed: float = 1.0
     congestion_penalty: float = 2.0
