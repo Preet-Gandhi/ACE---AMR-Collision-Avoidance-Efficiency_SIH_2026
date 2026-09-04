@@ -16,6 +16,7 @@ class Robot:
         self.last_priority = 0.0
         self.wait_threshold = 5.0
         self.blockage_waiting = 0.0
+        self.replan_count = 0
         self.auction = None
         self.robot_speed, self.congestion_penalty, self.priority_bonus, self.invalid_bid_penalty = robot_speed, congestion_penalty, priority_bonus, invalid_bid_penalty
         self.orca_enabled = orca_enabled
@@ -60,9 +61,31 @@ class Robot:
         else:
             self.task_queue.append(task)
         return True
+    def _choose_available_dropoff(self, task):
+        """Move a delivery to another bay slot if its assigned slot is occupied."""
+        if not self.state.carrying_package:
+            return
+        cells = list(getattr(self.warehouse, "dropoff_cells", ()))
+        if not cells:
+            return
+        occupied = {tuple(self.state.position)}
+        for payload in self.known_states.values():
+            position = payload.get("position") if isinstance(payload, dict) else None
+            if position is not None:
+                occupied.add(tuple(position))
+        if tuple(task.dropoff) not in occupied:
+            return
+        free = [cell for cell in cells if tuple(cell) not in occupied and self.warehouse.is_walkable(cell)]
+        if free:
+            task.dropoff = min(free, key=lambda cell: (abs(cell[0] - self.state.position[0]) + abs(cell[1] - self.state.position[1]), cell))
+
     def plan_path(self):
         task = self.tasks[self.state.current_task_id]
-        goal = task.dropoff if self.state.position == task.pickup else task.pickup
+        # Reaching the pickup cell completes the pickup phase.
+        if not self.state.carrying_package and self.state.position == task.pickup:
+            self.state.carrying_package = True
+        self._choose_available_dropoff(task)
+        goal = task.dropoff if self.state.carrying_package else task.pickup
         path = self.planner.find_path(self.state.position, goal, self.reservation_table, self.current_time)
         priority = self.calculate_priority()
         self.last_priority = priority
@@ -92,6 +115,7 @@ class Robot:
         if self.state.current_task_id is None: return None
         task = self.tasks.pop(self.state.current_task_id)
         task.cancel()
+        self.state.carrying_package = False
         self.release_reservation()
         self.state.clear_path()
         self.state.clear_task()
@@ -164,7 +188,7 @@ class Robot:
                     self._orca_target = nxt
         return result
 
-    def move(self):
+    def move(self, blocked_positions=None):
         planned = self.state.get_next_position()
         nxt = self._orca_target if self.orca_enabled and self._orca_result is not None else planned
         detour = nxt is not None and planned is not None and nxt != planned
@@ -172,7 +196,17 @@ class Robot:
         if nxt is None: return False
         if not self.warehouse.is_walkable(nxt):
             return False
-        if self.reservation_table.get_owner(nxt, self.current_time + 1) != self.robot_id:
+        # Physical occupancy is an independent safety layer. A reservation
+        # bug must never allow a robot to drive into another robot.
+        blocked_positions = {tuple(p) for p in (blocked_positions or [])}
+        if tuple(nxt) in blocked_positions:
+            self.state.status = "WAITING"
+            self.waiting_time += 0.1
+            self.blockage_waiting += 0.1
+            return False
+        reservation_time = int(self.current_time) + 1
+        owner = self.reservation_table.get_owner(nxt, reservation_time)
+        if owner not in (None, self.robot_id):
             self.state.status = "WAITING"
             self.waiting_time += 0.1
             self.blockage_waiting += 0.1
@@ -181,8 +215,26 @@ class Robot:
             if self.blockage_waiting >= self.wait_threshold and not self.is_path_valid():
                 self.fail_current_task()
             return False
+        # A path reservation can expire while the robot is waiting. If the
+        # cell is physically free, claim the next vertex and edge for this
+        # actual tick instead of freezing until the old reservation timeline
+        # catches up.
+        if owner is None:
+            previous = tuple(self.state.position)
+            if not self.reservation_table.reserve(self.robot_id, nxt, reservation_time):
+                self.state.status = "WAITING"
+                self.waiting_time += 0.1
+                return False
+            if not self.reservation_table.reserve_edge(self.robot_id, previous, tuple(nxt), reservation_time):
+                self.reservation_table.release(self.robot_id)
+                self.state.status = "WAITING"
+                self.waiting_time += 0.1
+                return False
         self.state.update_velocity((nxt[0] - self.state.position[0], nxt[1] - self.state.position[1]))
         self.state.update_position(nxt)
+        task = self.tasks.get(self.state.current_task_id) if self.state.current_task_id is not None else None
+        if task is not None and self.state.position == task.pickup:
+            self.state.carrying_package = True
         if planned == nxt:
             self.state.path_index += 1
         self.state.consume_battery(1)
@@ -200,14 +252,22 @@ class Robot:
         task = self.tasks.get(self.state.current_task_id)
         return bool(task and self.state.position == task.dropoff and self.state.path_index >= len(self.state.path))
     def complete_task(self):
-        task = self.tasks[self.state.current_task_id]; task.complete(); self.reservation_table.release(self.robot_id); self.state.clear_path()
+        task = self.tasks[self.state.current_task_id]
+        task.complete()
+        self.reservation_table.release(self.robot_id)
+        self.state.carrying_package = False
+        self.state.clear_path()
         if self.task_queue:
             next_task = self.task_queue.pop(0)
             self.state.set_task(next_task.task_id); next_task.start()
         else:
             self.state.clear_task()
     def handle_blockage(self): self.replan()
-    def replan(self): self.reservation_table.release(self.robot_id); self.state.clear_path(); return self.plan_path()
+    def replan(self):
+        self.replan_count += 1
+        self.reservation_table.release(self.robot_id)
+        self.state.clear_path()
+        return self.plan_path()
     def request_reservation(self): return bool(self.state.path) and self.reservation_table.reserve_path(self.robot_id, self.state.path)
     def release_reservation(self): self.reservation_table.release(self.robot_id)
     def detect_conflict(self):
@@ -224,3 +284,4 @@ class Robot:
     def handle_conflict(self, duration=0.1):
         self.state.status = "WAITING"
         self.waiting_time += duration
+

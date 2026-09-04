@@ -40,6 +40,7 @@ class Simulator:
         #
         # from being reported as three different deadlocks.
         self._counted_deadlock_cycles = set()
+        self._active_collision_pairs = set()
 
     # ------------------------------------------------------------------
     # MAIN SIMULATION STEP
@@ -82,17 +83,43 @@ class Simulator:
             if result is not None:
                 self.metrics.record_orca(result, robot._orca_preferred_velocity, robot._orca_target is not None)
 
-        for robot in self.robots:
+        # Atomic occupancy guard. Process one robot at a time in priority
+        # order. Robots that have not yet been processed still occupy their
+        # old cells; once a robot successfully moves, its old cell is free and
+        # a following robot may enter it on the same tick. This prevents
+        # overlap without introducing a permanent one-cell-following deadlock.
+        movement_order = sorted(
+            self.robots,
+            key=lambda item: (-item.calculate_priority(), item.robot_id),
+        )
+        positions_before = {robot.robot_id: tuple(robot.state.position) for robot in self.robots}
+        unmoved_ids = {robot.robot_id for robot in movement_order}
+
+        for robot in movement_order:
+            before_replans = getattr(robot, "replan_count", 0)
+            blocked_positions = {
+                positions_before[rid]
+                for rid in unmoved_ids
+                if rid != robot.robot_id
+            }
+            moved = False
             if robot.detect_conflict():
-                robot.handle_conflict(
-                    self.dt
-                )
+                robot.handle_conflict(self.dt)
+                self.metrics.record_wait(robot, self.dt)
             else:
-                if robot.move():
-                    self.metrics.record_movement(
-                        robot,
-                        1.0,
-                    )
+                moved = robot.move(blocked_positions=blocked_positions)
+                if moved:
+                    self.metrics.record_movement(robot, 1.0)
+                else:
+                    self.metrics.record_wait(robot, self.dt)
+
+            # Only remove the robot from the occupancy guard if it actually
+            # vacated its old cell. A robot that was denied movement remains
+            # physically present and must continue blocking that cell.
+            if moved:
+                unmoved_ids.discard(robot.robot_id)
+            if getattr(robot, "replan_count", 0) > before_replans:
+                self.metrics.replanning_count += getattr(robot, "replan_count", 0) - before_replans
 
         # --------------------------------------------------------------
         # PHYSICAL COLLISION CHECK
@@ -104,33 +131,24 @@ class Simulator:
             )
         )
 
-        for a, b in collisions:
-            self.metrics.record_collision(
-                a,
-                b,
-            )
+        # Count a physical overlap once per robot pair, not once per frame.
+        current_collision_pairs = {tuple(sorted((a.robot_id, b.robot_id))) for a, b in collisions}
+        for pair in current_collision_pairs - self._active_collision_pairs:
+            a = next(r for r in self.robots if r.robot_id == pair[0])
+            b = next(r for r in self.robots if r.robot_id == pair[1])
+            self.metrics.record_collision(a, b)
+        self._active_collision_pairs = current_collision_pairs
 
         # --------------------------------------------------------------
         # FUTURE PATH CONFLICT CHECK
         # --------------------------------------------------------------
-
-        path_conflicts = (
-            self.collision_detector.detect_all_path_conflicts(
-                self.robots
-            )
-        )
-
-        for a, b in path_conflicts:
-            if (a, b) not in collisions and (
-                b,
-                a,
-            ) not in collisions:
-                a.handle_conflict(
-                    self.dt
-                )
-                b.handle_conflict(
-                    self.dt
-                )
+        # Do not stop robots merely because their geometric paths intersect.
+        # The reservation table is time-indexed and already decides whether
+        # the two robots can occupy the same vertex/edge at the same tick.
+        # Treating every geometric intersection as a live conflict creates
+        # false deadlocks and was the main source of the old simulation
+        # freezing on shared aisles.
+        path_conflicts = self.collision_detector.detect_all_path_conflicts(self.robots)
 
         # --------------------------------------------------------------
         # TASK COMPLETION

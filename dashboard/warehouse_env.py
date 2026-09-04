@@ -74,6 +74,7 @@ class WarehouseEnvironment:
         self.num_robots = num_robots
         self.custom_obstacles: Set[Tuple[int, int]] = set()
         self._next_task_id = 1
+        self._dropoff_allocations: Dict[int, Tuple[int, int]] = {}
         self.reset()
 
     def reset(self) -> None:
@@ -84,6 +85,9 @@ class WarehouseEnvironment:
             grid[y][x] = 1
 
         self.warehouse = Warehouse(grid)
+        # Expose the physical delivery-bay capacity to the planner.
+        self.warehouse.dropoff_cells = tuple(self.DROPOFF_CELLS)
+        self.warehouse.dropoff_station = self.DROPOFF_STATION
         self.network = Network()
         self.reservations = ReservationTable()
         self.metrics = Metrics()
@@ -117,6 +121,7 @@ class WarehouseEnvironment:
             dt=0.1,
         )
         self._next_task_id = 1
+        self._dropoff_allocations = {}
 
     def is_dropoff_reachable_with_obstacle(self, obstacle_pos: Tuple[int, int]) -> bool:
         """Verifies that placing an obstacle at pos does not disconnect the common dropoff from the warehouse."""
@@ -190,7 +195,21 @@ class WarehouseEnvironment:
         task_id = self._next_task_id
         self._next_task_id += 1
 
-        task = Task(task_id, pickup=pickup, dropoff=self.DROPOFF_STATION, priority=2)
+        # The station is a 4-cell bay, not one magic destination cell.
+        # Allocate the least-loaded bay slot so concurrent deliveries spread
+        # across the available physical capacity.
+        active_tasks = [
+            t for t in self.warehouse.tasks.values()
+            if not t.is_finished()
+        ]
+        load = {cell: 0 for cell in self.DROPOFF_CELLS}
+        for t in active_tasks:
+            if t.dropoff in load:
+                load[t.dropoff] += 1
+        dropoff = min(self.DROPOFF_CELLS, key=lambda cell: (load[cell], abs(cell[0] - pickup[0]) + abs(cell[1] - pickup[1]), cell))
+        self._dropoff_allocations[task_id] = dropoff
+
+        task = Task(task_id, pickup=pickup, dropoff=dropoff, priority=2)
         self.warehouse.add_task(task)
 
         if robot_id is not None:
@@ -221,6 +240,10 @@ class WarehouseEnvironment:
     def step(self) -> None:
         """Advances the real simulation clock by one step."""
         self.simulator.step()
+        for task_id, cell in list(self._dropoff_allocations.items()):
+            task = self.warehouse.tasks.get(task_id)
+            if task is not None and task.is_finished():
+                del self._dropoff_allocations[task_id]
 
     def get_snapshot(self) -> Dict[str, Any]:
         """Extracts a read-only snapshot dictionary directly from the live simulation state."""
@@ -233,21 +256,17 @@ class WarehouseEnvironment:
 
             task_id = r.state.current_task_id
             task = self.warehouse.tasks.get(task_id) if task_id is not None else None
-            has_package = False
+            has_package = bool(r.state.carrying_package)
             task_stage = "IDLE"
 
             if task is not None:
-                if r.state.position == task.pickup:
-                    has_package = True
-                    task_stage = "AT_PICKUP"
-                elif remaining_wps and remaining_wps[-1] == task.dropoff:
-                    has_package = True
-                    task_stage = "TRANSPORTING"
-                elif r.state.position == task.dropoff and not remaining_wps:
-                    has_package = False
+                if has_package and r.state.position == task.dropoff and not remaining_wps:
                     task_stage = "DELIVERED"
+                elif has_package:
+                    task_stage = "TRANSPORTING"
+                elif r.state.position == task.pickup:
+                    task_stage = "AT_PICKUP"
                 else:
-                    has_package = False
                     task_stage = "GOING_TO_PICKUP"
             elif r.state.status == "WAITING":
                 task_stage = "WAITING"
