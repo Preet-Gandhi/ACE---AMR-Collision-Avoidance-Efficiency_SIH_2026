@@ -14,13 +14,15 @@ class ReservationTable:
     def __init__(self):
         self._reservations = {}
         self._edge_reservations = {}
+        self._leases = {}
+        self._edge_leases = {}
         self._priorities = {}
 
     @staticmethod
     def _pos(position):
         return tuple(position)
 
-    def reserve(self, robot_id, position, timestep):
+    def reserve(self, robot_id, position, timestep, lease_until=None):
         key = (self._pos(position), int(timestep))
         owner = self._reservations.get(key)
 
@@ -28,9 +30,11 @@ class ReservationTable:
             return False
 
         self._reservations[key] = robot_id
+        if lease_until is not None:
+            self._leases[key] = float(lease_until)
         return True
 
-    def reserve_edge(self, robot_id, source, target, timestep):
+    def reserve_edge(self, robot_id, source, target, timestep, lease_until=None):
         source = self._pos(source)
         target = self._pos(target)
         timestep = int(timestep)
@@ -48,6 +52,8 @@ class ReservationTable:
             return False
 
         self._edge_reservations[key] = robot_id
+        if lease_until is not None:
+            self._edge_leases[key] = float(lease_until)
         return True
 
     def release(self, robot_id):
@@ -60,6 +66,8 @@ class ReservationTable:
             k: v for k, v in self._edge_reservations.items()
             if v != robot_id
         }
+        self._leases = {k: v for k, v in self._leases.items() if k in self._reservations}
+        self._edge_leases = {k: v for k, v in self._edge_leases.items() if k in self._edge_reservations}
 
     def is_reserved(self, position, timestep):
         return (
@@ -116,6 +124,19 @@ class ReservationTable:
             for key, owner in self._edge_reservations.items()
             if key[2] >= timestep
         }
+        self._leases = {key: expiry for key, expiry in self._leases.items() if key in self._reservations}
+        self._edge_leases = {key: expiry for key, expiry in self._edge_leases.items() if key in self._edge_reservations}
+
+    def release_expired_leases(self, current_time):
+        """Release reservations whose owner failed to renew its lease."""
+        expired_vertices = {key for key, expiry in self._leases.items() if expiry <= current_time}
+        expired_edges = {key for key, expiry in self._edge_leases.items() if expiry <= current_time}
+        for key in expired_vertices:
+            self._reservations.pop(key, None)
+        for key in expired_edges:
+            self._edge_reservations.pop(key, None)
+        self._leases = {key: expiry for key, expiry in self._leases.items() if key in self._reservations}
+        self._edge_leases = {key: expiry for key, expiry in self._edge_leases.items() if key in self._edge_reservations}
 
     def path_conflicts(self, robot_id, path, start_time=0):
         conflicts = []
@@ -217,6 +238,7 @@ class ReservationTable:
         path,
         start_time=0,
         priority=None,
+        lease_until=None,
     ):
         path = [
             self._pos(position)
@@ -238,6 +260,11 @@ class ReservationTable:
             robot_id,
             path,
             start_time,
+        )
+
+        snapshot = (
+            self._reservations.copy(), self._edge_reservations.copy(),
+            self._leases.copy(), self._edge_leases.copy(), self._priorities.copy()
         )
 
         if conflicts:
@@ -285,12 +312,9 @@ class ReservationTable:
                 robot_id,
                 position,
                 timestep,
+                lease_until,
             ):
-                self._rollback(
-                    robot_id,
-                    added_vertices,
-                    added_edges,
-                )
+                self._restore(snapshot)
                 return False
 
             added_vertices.append(
@@ -309,12 +333,9 @@ class ReservationTable:
                     source,
                     target,
                     timestep,
+                    lease_until,
                 ):
-                    self._rollback(
-                        robot_id,
-                        added_vertices,
-                        added_edges,
-                    )
+                    self._restore(snapshot)
                     return False
 
                 added_edges.append(
@@ -326,6 +347,11 @@ class ReservationTable:
                 )
 
         return True
+
+    def _restore(self, snapshot):
+        self._reservations, self._edge_reservations, self._leases, self._edge_leases, self._priorities = (
+            value.copy() for value in snapshot
+        )
 
     def _rollback(
         self,

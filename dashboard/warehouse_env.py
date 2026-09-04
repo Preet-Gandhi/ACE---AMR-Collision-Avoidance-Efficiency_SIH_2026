@@ -105,6 +105,7 @@ class WarehouseEnvironment:
                 self.reservations,
                 battery=10_000.0,
                 distributed=True,
+                orca_enabled=True,
             )
             for i in range(self.num_robots)
         ]
@@ -120,6 +121,7 @@ class WarehouseEnvironment:
             self.metrics,
             self.auction,
             dt=0.1,
+            orca_enabled=True,
         )
         self._next_task_id = 1
         self._dropoff_allocations = {}
@@ -174,7 +176,7 @@ class WarehouseEnvironment:
         self.custom_obstacles.add(pos)
         self.simulator.spawn_obstacle(pos)
         for r in self.robots:
-            r.handle_obstacle(pos, announce=True)
+            r.handle_obstacle(pos, announce=False)
             r.update()
         return True, f"Obstacle placed at ({pos[0]}, {pos[1]}). Real replan triggered."
 

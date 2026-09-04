@@ -17,6 +17,8 @@ class Auction:
         self.claim_timeout = claim_timeout
         self.rounds = {}
         self.claims = {}
+        self.auction_ids = {}
+        self.claim_timestamps = {}
         for robot in self.robots: robot.auction = self
 
     @staticmethod
@@ -30,6 +32,7 @@ class Auction:
         auction_id = auction_id or f"task-{task.task_id}-{task.created_time}"
         round_number = self.rounds.get(task.task_id, -1) + 1
         self.rounds[task.task_id] = round_number
+        self.auction_ids[task.task_id] = auction_id
         self.claims.pop(task.task_id, None)
         task.status = TaskStatus.AUCTIONING
         self.bids[task.task_id] = {}
@@ -57,14 +60,30 @@ class Auction:
         payload = message.payload
         bid = payload.get("bid")
         if isinstance(bid, dict):
+            task_id = bid.get("task_id", payload.get("task_id"))
+            if (task_id not in self.rounds
+                    or payload.get("auction_id") != self.auction_ids.get(task_id)
+                    or payload.get("round") != self.rounds.get(task_id)):
+                return False
             from auction.bid import Bid
             fields = {k: bid[k] for k in ("robot_id", "task_id", "travel_cost", "time_cost",
                 "battery_cost", "congestion_cost", "priority_bonus", "timestamp", "valid") if k in bid}
             self.submit_bid(Bid(**fields), payload.get("auction_id"), payload.get("round"))
+            return True
+        return False
 
     def receive_claim(self, message):
         payload = message.payload
-        self.claims[payload.get("task_id")] = (payload.get("robot_id"), payload.get("auction_id"), payload.get("round"))
+        task_id = payload.get("task_id")
+        auction_id = payload.get("auction_id")
+        round_number = payload.get("round")
+        if task_id not in self.rounds or self.auction_ids.get(task_id) != auction_id or self.rounds[task_id] != round_number:
+            return False
+        if message.timestamp < self.claim_timestamps.get(task_id, float("-inf")):
+            return False
+        self.claim_timestamps[task_id] = message.timestamp
+        self.claims[task_id] = (payload.get("robot_id"), auction_id, round_number)
+        return True
 
     def release_task(self, task):
         """Return a failed task to the pending pool and notify all peers."""

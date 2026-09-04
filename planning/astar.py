@@ -18,6 +18,7 @@ class AStarPlanner:
         reservations=None,
         start_time=0,
         blocked=None,
+        robot_id=None,
     ):
         """
         Find a shortest path using A*.
@@ -80,6 +81,12 @@ class AStarPlanner:
                         neighbor,
                         start_time + next_cost,
                     ):
+                        if reservations.get_owner(neighbor, start_time + next_cost) != robot_id:
+                            continue
+                    edge_time = start_time + next_cost
+                    edge_owner = reservations.get_edge_owner(current, neighbor, edge_time)
+                    reverse_owner = reservations.get_edge_owner(neighbor, current, edge_time)
+                    if edge_owner not in (None, robot_id) or reverse_owner not in (None, robot_id):
                         continue
 
                 if next_cost < cost.get(
