@@ -158,88 +158,69 @@ Acceptance criteria:
 - The fleet eventually completes the scenario.
 - Collisions remain zero.
 
-### Person 3: Benchmarking and Metrics
-
-Own these files:
-
-- `simulation/metrics.py`
-- New files:
-  - `scenarios/benchmark.py`
-  - `tests/test_benchmark.py`
-  - `benchmark.py`
-
-Implement:
-
-- Baseline and distributed result schemas.
-- Completion time comparison.
-- Throughput.
-- Average task time.
-- Collision count.
-- Deadlock count.
-- Waiting time.
-- Travel distance.
-- Replanning count.
-- Improvement percentage.
-
-Use this result structure:
-
-```python
-{
-    "mode": "baseline" | "distributed",
-    "seed": int,
-    "robot_count": int,
-    "task_count": int,
-    "completion_time": float,
-    "throughput": float,
-    "collisions": int,
-    "deadlocks": int,
-    "waiting_time": float,
-    "total_distance": float,
-    "replans": int,
-    "improvement": float | None,
-}
-```
-
-Use controlled seeds:
-
-```text
-42
-43
-44
-45
-46
-```
-
-Start with:
-
-```text
-3 robots, 20 tasks
-3 robots, 50 tasks
-3 robots, 100 tasks
-```
-
+### New Task for Person 3: Benchmark Reporting and Analysis
+Improve the benchmark output so it produces an evaluation report suitable for the project presentation.
+Own only:
+- simulation/metrics.py
+- scenarios/benchmark.py
+- benchmark.py
+- tests/test_benchmark.py
+- New file: benchmark_report.py
 Do not modify:
+- robots/
+- planning/
+- communication/
+- simulation/simulator.py
+- dashboard/
+- visualization/
+Implement:
+- Run all configurations:
+  - 3 robots
+  - 20, 50, 100 tasks
+  - Seeds 42, 43, 44, 45, 46
+- Calculate per configuration:
+  - Mean completion time
+  - Median completion time
+  - Mean throughput
+  - Mean waiting time
+  - Mean travel distance
+  - Mean replans
+  - Total collisions
+  - Total deadlocks
+  - Mean improvement
+- Report pass/fail:
+  - collision_count == 0
+  - improvement >= 20%
+- Export results to:
+  - benchmark_results.json
+  - benchmark_results.csv
+- Add CLI options:
+python benchmark.py --tasks 20 50 100 --seeds 42 43 44 45 46
+python benchmark_report.py benchmark_results.json
+Required report format:
+AMR BENCHMARK REPORT
+Robots: 3
+Tasks: 20
+Seeds: 5
 
-- `robots/robot.py`
-- `planning/*`
-- `communication/*`
-- `simulation/simulator.py`
-
-If baseline execution requires simulator changes, create an adapter in `scenarios/benchmark.py` rather than changing the simulator contract.
-
-Acceptance criteria:
-
-- Same scenario is run in both modes.
-- Results are reproducible for the same seed.
-- Improvement is calculated as:
-
-```text
-(baseline_time - distributed_time) / baseline_time * 100
-```
-
-- Reports whether:
-  - collisions are zero
-  - improvement is at least 20%
+Baseline mean time:  ...
+Distributed mean time: ...
+Mean improvement:      ...%
+Total collisions:      0
+Total deadlocks:       0
+Status: PASS
+Tests must verify:
+- Same seed produces identical results.
+- Aggregation calculates correct mean and median.
+- JSON and CSV contain all required fields.
+- A scenario with less than 20% improvement reports FAIL.
+- Any collision causes the safety status to report FAIL.
+- Existing tests remain passing.
+Final verification:
+python -m pytest -q
+python benchmark.py --tasks 20 --seeds 42 43 44 45 46
+python benchmark_report.py benchmark_results.json
+Do not commit generated benchmark_results.json or .csv unless the team explicitly wants benchmark artifacts versioned.
 
 ### Person 4: Dashboard and Visualization
 
