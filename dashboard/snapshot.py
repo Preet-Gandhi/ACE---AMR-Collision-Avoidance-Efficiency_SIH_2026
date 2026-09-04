@@ -11,6 +11,7 @@ class RobotView:
     position: Tuple[int, int]
     status: str = "UNKNOWN"
     battery: Optional[float] = None
+    battery_percentage: Optional[float] = None
     online: Optional[bool] = None
     availability_state: str = "UNKNOWN"
     charging_station: Optional[Tuple[int, int]] = None
@@ -259,6 +260,12 @@ class SnapshotNormalizer:
                         battery = float(battery)
                     except (ValueError, TypeError):
                         battery = None
+                battery_percentage = item.get("battery_percentage")
+                if battery_percentage is not None:
+                    try:
+                        battery_percentage = max(0.0, min(100.0, float(battery_percentage)))
+                    except (ValueError, TypeError):
+                        battery_percentage = None
                 task_id = item.get("current_task_id", item.get("active_task", item.get("task_id")))
                 online = item.get("online")
                 availability_state = str(item.get("availability_state", "UNKNOWN"))
@@ -275,6 +282,7 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=battery,
+                        battery_percentage=battery_percentage,
                         online=online,
                         availability_state=availability_state,
                         charging_station=charging_station,
@@ -292,6 +300,7 @@ class SnapshotNormalizer:
                     pos = SnapshotNormalizer._to_pos(getattr(state, "position", (0, 0))) or (0, 0)
                     status = str(getattr(state, "status", "UNKNOWN"))
                     battery = getattr(state, "battery", None)
+                    battery_percentage = getattr(state, "battery_percentage", None)
                     online = getattr(state, "online", None)
                     availability_state = str(getattr(state, "availability_state", "UNKNOWN"))
                     charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
@@ -301,6 +310,7 @@ class SnapshotNormalizer:
                     pos = SnapshotNormalizer._to_pos(getattr(item, "position", (0, 0))) or (0, 0)
                     status = str(getattr(item, "status", "UNKNOWN"))
                     battery = getattr(item, "battery", None)
+                    battery_percentage = getattr(item, "battery_percentage", None)
                     online = getattr(item, "online", None)
                     availability_state = str(getattr(item, "availability_state", "UNKNOWN"))
                     charging_station = SnapshotNormalizer._to_pos(getattr(item, "charging_station", None))
@@ -318,6 +328,7 @@ class SnapshotNormalizer:
                         position=pos,
                         status=status,
                         battery=float(battery) if battery is not None else None,
+                        battery_percentage=(float(battery_percentage) if battery_percentage is not None else None),
                         online=online,
                         availability_state=availability_state,
                         charging_station=charging_station,

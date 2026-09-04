@@ -417,6 +417,12 @@ class WarehouseEnvironment:
         grid = [[0 for _ in range(self.width)] for _ in range(self.height)]
         for x, y in self.shelf_blocks:
             grid[y][x] = 1
+        # The baseline must run on the exact same physical layout.  The old
+        # clone silently dropped user-placed dynamic obstacles, making the
+        # benchmark artificially favorable to the baseline.
+        for x, y in self.custom_obstacles:
+            if 0 <= x < self.width and 0 <= y < self.height:
+                grid[y][x] = 1
 
         b_warehouse = Warehouse(grid)
         b_warehouse.dropoff_cells = tuple(self.dropoff_cells)
@@ -460,17 +466,45 @@ class WarehouseEnvironment:
             t = Task(tid, pickup=p, dropoff=d, priority=2)
             b_sim.spawn_task(t)
 
-        summary = b_sim.run_stop_and_wait(steps=2000)
-        comp_time = summary.get("completion_time", 0.0)
+        # True stop-and-wait reference: only one robot is allowed to advance
+        # per simulation tick.  The previous implementation called every
+        # robot once per loop, then incremented time once per robot, which was
+        # neither a real stop-and-wait policy nor a comparable clock.
+        b_sim.metrics.start_simulation(b_sim.time)
         per_task = {}
-        for i, (tid, _, _) in enumerate(tasks_specs):
-            per_task[tid] = round(comp_time * (i + 1) / len(tasks_specs), 2)
+        max_steps = max(2000, len(tasks_specs) * 1000)
+        steps = 0
+        for robot in b_robots:
+            while (robot.state.current_task_id is not None or robot.task_queue) and steps < max_steps:
+                timestep = round(b_sim.time / b_sim.dt)
+                b_sim.reservation_table.release_expired(timestep)
+                b_sim.reservation_table.release_expired_leases(timestep)
+                robot.set_time(timestep)
+                robot.update()
+                if robot.state.current_task_id is not None and robot.state.get_next_position() is None:
+                    robot.plan_path()
+                if robot.move():
+                    b_sim.metrics.record_movement(robot, 1.0)
+                if robot.is_task_complete():
+                    task = robot.tasks[robot.state.current_task_id]
+                    robot.complete_task()
+                    b_sim.metrics.record_task_completed(task, robot)
+                    per_task[task.task_id] = round(b_sim.time + b_sim.dt, 2)
+                b_sim.time += b_sim.dt
+                steps += 1
 
+        # A baseline that cannot finish must never masquerade as a tiny
+        # completion time.  Keep the actual elapsed time and expose unfinished
+        # tasks to the caller so the UI can report the comparison honestly.
+        b_sim.metrics.end_simulation(b_sim.time)
+        summary = b_sim.metrics.get_summary()
+        comp_time = summary.get("completion_time", 0.0)
         return {
             "completion_time": comp_time,
             "collisions": summary.get("collisions", 0),
             "deadlocks": summary.get("deadlocks", 0),
             "per_task_times": per_task,
+            "completed_tasks": summary.get("tasks_completed", 0),
         }
 
     def spawn_task(
@@ -572,15 +606,20 @@ class WarehouseEnvironment:
         return tasks
 
     def is_scenario_finished(self) -> bool:
-        """Returns True if all tasks in the current scenario have reached a terminal state."""
+        """Return True only after task delivery *and* dropoff-bay cleanup finish."""
         if not self.current_scenario_task_ids:
             return True
         for tid in self.current_scenario_task_ids:
             t = self.warehouse.tasks.get(tid)
             if t is not None and not t.is_finished():
                 return False
+        # Completed AMRs are physically moved out of the delivery bay.  Do not
+        # start the next scenario while that one-cell cleanup move is still
+        # pending; otherwise a new scenario can spawn into occupied bays.
         for r in self.robots:
             if r.state.current_task_id in self.current_scenario_task_ids:
+                return False
+            if r.state.get_next_position() is not None:
                 return False
         return True
 
@@ -673,6 +712,10 @@ class WarehouseEnvironment:
                 "position": r.state.position,
                 "status": r.state.status,
                 "battery": r.state.battery,
+                "battery_percentage": (
+                    (r.state.battery / r.initial_battery) * 100.0
+                    if r.initial_battery > 0 else 0.0
+                ),
                 "online": r.state.online,
                 "availability_state": r.state.availability_state,
                 "charging_station": r.charging_station,
@@ -767,8 +810,15 @@ class WarehouseEnvironment:
             "conflicts": conflicts,
             "comparison": comparison_data,
             "metrics": {
-                "tasks_completed": summary.get("tasks_completed", 0),
-                "total_tasks": len(self.warehouse.tasks),
+                # Dashboard KPIs are scenario-local.  Keeping historical tasks
+                # in the warehouse is useful for audit/history, but they must
+                # not inflate the current scenario denominator.
+                "tasks_completed": sum(
+                    1 for tid in self.current_scenario_task_ids
+                    if self.warehouse.tasks.get(tid) is not None
+                    and self.warehouse.tasks[tid].status.value == "COMPLETED"
+                ),
+                "total_tasks": len(self.current_scenario_task_ids),
                 "collisions": summary.get("collisions", 0),
                 "deadlocks": summary.get("deadlocks", 0),
                 "replanning_count": summary.get("replanning_count", 0),

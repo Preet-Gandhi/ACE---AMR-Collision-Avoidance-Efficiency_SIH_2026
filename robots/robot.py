@@ -546,18 +546,15 @@ class Robot:
         peers = len(online_peer_ids) + 1
         if len({bid.robot_id for bid in bids}) < peers:
             return
-        claimed_winners = {
-            claim[0]
-            for claimed_task, claim in getattr(self.auction, "claims", {}).items()
-            if claimed_task != task_id and claim[2] == current_round
-        }
-        claimed_winners.update(
-            winner_id
-            for claimed_task, (winner_id, claimed_round, _) in self.pending_claims.items()
-            if claimed_task != task_id and claimed_round == current_round
-        )
-        valid = [bid for bid in bids if bid.valid and bid.robot_id in online_peer_ids | {self.robot_id}
-                 and bid.robot_id not in claimed_winners]
+        # A robot may own more than one task; accept_task() queues additional
+        # work and workload_cost in the bid already discourages overloading one
+        # robot.  The old implementation globally excluded robots that had
+        # already won another task in this auction round, which left every
+        # task after the first N robots stuck in AUCTIONING forever.
+        valid = [
+            bid for bid in bids
+            if bid.valid and bid.robot_id in online_peer_ids | {self.robot_id}
+        ]
         winner = min(valid, key=lambda bid: (bid.total_cost, bid.robot_id)) if valid else None
         if winner is None or task_id in self.claimed_auctions:
             return
@@ -737,7 +734,8 @@ class Robot:
         if not self.is_online():
             self.go_offline()
             return
-        if self.state.battery <= 25.0 and self.state.availability_state == "ONLINE":
+        low_battery_threshold = self.initial_battery * 0.25
+        if self.state.battery <= low_battery_threshold and self.state.availability_state == "ONLINE":
             self.state.availability_state = "LOW_BATTERY"
         self._expire_pending_reservations()
         if self.distributed:
@@ -997,4 +995,3 @@ class Robot:
     def handle_conflict(self, duration=0.1):
         self.state.status = "WAITING"
         self.waiting_time += duration
-

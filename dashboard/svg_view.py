@@ -120,6 +120,20 @@ class SvgWarehouseRenderer:
             '    <feGaussianBlur stdDeviation="2" result="blur" />',
             '    <feComposite in="SourceGraphic" in2="blur" operator="over" />',
             '  </filter>',
+            '  <style>',
+            '    .amr-moving { animation: amrPulse 1.15s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }',
+            '    .amr-waiting { animation: waitPulse 1.5s ease-in-out infinite; }',
+            '    .path-live { animation: pathDash 1.6s linear infinite; }',
+            '    .dropoff-live { animation: dropPulse 1.8s ease-in-out infinite; }',
+            '    .charger-live { animation: chargerPulse 1.8s ease-in-out infinite; }',
+            '    .reticle-live { animation: reticlePulse 1.2s ease-in-out infinite; }',
+            '    @keyframes amrPulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.88; transform:scale(1.06); } }',
+            '    @keyframes waitPulse { 0%,100% { opacity:.85; } 50% { opacity:.48; } }',
+            '    @keyframes pathDash { to { stroke-dashoffset:-36; } }',
+            '    @keyframes dropPulse { 0%,100% { opacity:.82; } 50% { opacity:1; } }',
+            '    @keyframes chargerPulse { 0%,100% { opacity:.72; } 50% { opacity:1; } }',
+            '    @keyframes reticlePulse { 0%,100% { opacity:.62; } 50% { opacity:1; } }',
+            '  </style>',
             '</defs>',
         ])
 
@@ -176,7 +190,7 @@ class SvgWarehouseRenderer:
                         ch_txt = "#93c5fd"
 
                     svg.append(
-                        f'<rect x="{rx+1}" y="{ry+1}" width="{cell_size-2}" height="{cell_size-2}" '
+                        f'<rect class="charger-live" x="{rx+1}" y="{ry+1}" width="{cell_size-2}" height="{cell_size-2}" '
                         f'rx="3" fill="{ch_bg}" stroke="{ch_stroke}" stroke-width="1.5" />'
                     )
                     svg.append(
@@ -221,7 +235,7 @@ class SvgWarehouseRenderer:
             sy = padding + target_cell[1] * cell_size
             c_len = min(10, cell_size // 4)
             svg.append(
-                f'<rect x="{sx}" y="{sy}" width="{cell_size}" height="{cell_size}" '
+                f'<rect class="reticle-live" x="{sx}" y="{sy}" width="{cell_size}" height="{cell_size}" '
                 f'fill="rgba(56, 189, 248, 0.15)" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 2" rx="3" filter="url(#reticle-glow)" />'
             )
             # Corner targeting brackets
@@ -238,7 +252,7 @@ class SvgWarehouseRenderer:
             badge_w = max(28, len(d_str) * 8 + 10)
             badge_h = min(24, cell_size - 4)
             svg.append(
-                f'<rect x="{cx - badge_w/2}" y="{cy - badge_h/2}" width="{badge_w}" height="{badge_h}" rx="4" '
+                f'<rect class="dropoff-live" x="{cx - badge_w/2}" y="{cy - badge_h/2}" width="{badge_w}" height="{badge_h}" rx="4" '
                 f'fill="#064e3b" stroke="#10b981" stroke-width="2" />'
             )
             svg.append(
@@ -290,18 +304,27 @@ class SvgWarehouseRenderer:
 
                     polyline_str = " ".join(pts)
                     svg.append(
-                        f'<polyline points="{polyline_str}" fill="none" stroke="{color}" stroke-width="2.5" '
+                        f'<polyline class="path-live" points="{polyline_str}" fill="none" stroke="{color}" stroke-width="2.5" '
                         f'stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#{marker_id})" opacity="0.85" />'
                     )
 
         # 7. AMRs — render the authoritative simulator position only.
         for r in snapshot.robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
-            st = (r.availability_state if r.availability_state not in {"", "UNKNOWN"}
-                  else r.status).upper()
+            availability = (r.availability_state or "UNKNOWN").upper()
+            raw_status = (r.status or "UNKNOWN").upper()
+            critical_states = {"DISCHARGED", "OFFLINE", "GOING_TO_CHARGER", "CHARGING", "LOW_BATTERY"}
+            st = availability if availability in critical_states else raw_status
+            if st in {"UNKNOWN", "ONLINE", "PLANNING"}:
+                st = raw_status if raw_status not in {"UNKNOWN", "ONLINE", "PLANNING"} else availability
             is_conflicted = str(r.robot_id) in conflicted_robots or r.position in conflict_cells
             is_discharged = st == "DISCHARGED" or r.battery <= 0
-            is_low_battery = not is_discharged and (r.battery <= 25.0 or st == "LOW_BATTERY") and st not in ("OFFLINE", "CHARGING")
+            battery_pct = getattr(r, "battery_percentage", None)
+            is_low_battery = (
+                not is_discharged
+                and ((battery_pct is not None and battery_pct <= 25.0) or st == "LOW_BATTERY")
+                and st not in ("OFFLINE", "CHARGING")
+            )
 
             if is_conflicted:
                 state_color = ROBOT_COLORS["CONFLICT"]
@@ -331,8 +354,10 @@ class SvgWarehouseRenderer:
                     f'<circle cx="{cx}" cy="{cy}" r="{r_radius + 4}" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="3 2" />'
                 )
 
+            motion_class = "amr-moving" if st == "MOVING" else ("amr-waiting" if st == "WAITING" else "")
+            class_attr = f' class="{motion_class}"' if motion_class else ""
             svg.append(
-                f'<circle cx="{cx}" cy="{cy}" r="{r_radius}" fill="{state_color}" stroke="#ffffff" stroke-width="2" />'
+                f'<circle{class_attr} cx="{cx}" cy="{cy}" r="{r_radius}" fill="{state_color}" stroke="#ffffff" stroke-width="2" />'
             )
             r_font_sz = max(8, min(11, r_radius))
             svg.append(

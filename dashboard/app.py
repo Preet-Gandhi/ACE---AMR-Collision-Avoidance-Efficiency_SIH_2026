@@ -100,7 +100,45 @@ st.markdown(
         line-height: 1;
         color: #38bdf8;
         font-family: ui-monospace, monospace;
+        text-shadow: 0 0 16px rgba(56,189,248,.18);
     }
+    .kpi-card {
+        position: relative;
+        overflow: hidden;
+        transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+    }
+    .kpi-card::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(110deg, transparent 35%, rgba(255,255,255,.045) 50%, transparent 65%);
+        transform: translateX(-120%);
+        animation: kpiSweep 4.5s ease-in-out infinite;
+        pointer-events: none;
+    }
+    .kpi-card:hover {
+        transform: translateY(-1px);
+        border-color: #334155;
+        box-shadow: 0 8px 24px rgba(0,0,0,.22);
+    }
+    .mission-strip {
+        display:flex; align-items:center; gap:10px; margin:7px 0 8px; padding:7px 10px;
+        border:1px solid #1e293b; border-radius:8px; background:#0f172a;
+        font-size:10px; color:#94a3b8;
+    }
+    .mission-progress {
+        flex:1; height:5px; border-radius:99px; background:#1e293b; overflow:hidden;
+    }
+    .mission-progress > span {
+        display:block; height:100%; border-radius:99px; background:#10b981;
+        box-shadow:0 0 12px rgba(16,185,129,.45); transition:width .35s ease;
+    }
+    .live-dot {
+        width:7px; height:7px; border-radius:50%; background:#10b981;
+        box-shadow:0 0 0 0 rgba(16,185,129,.55); animation: livePulse 1.7s infinite;
+    }
+    @keyframes kpiSweep { 0%,60% { transform:translateX(-120%); } 85%,100% { transform:translateX(120%); } }
+    @keyframes livePulse { 0% { box-shadow:0 0 0 0 rgba(16,185,129,.55); } 70% { box-shadow:0 0 0 7px rgba(16,185,129,0); } 100% { box-shadow:0 0 0 0 rgba(16,185,129,0); } }
     .warehouse-wrapper {
         display: flex;
         justify-content: center;
@@ -338,7 +376,10 @@ with col_panel:
             )
             st.rerun()
     with col_sc2:
-        active_cnt = len([t for t in env.warehouse.tasks.values() if not t.is_finished()])
+        active_cnt = len([
+            t for tid in env.current_scenario_task_ids
+            if (t := env.warehouse.tasks.get(tid)) is not None and not t.is_finished()
+        ])
         st.markdown(
             f"<div style='font-size:10px; color:#94a3b8; text-align:right; padding-top:4px;'><b style='color:#38bdf8;'>{active_cnt} active</b></div>",
             unsafe_allow_html=True,
@@ -561,8 +602,13 @@ with col_main:
     # 2. Exactly Four Primary Aligned KPI Cards
     kpi_c1, kpi_c2, kpi_c3, kpi_c4 = st.columns(4)
 
-    total_tasks = metrics.total_tasks or len(normalized.tasks) or len(env.warehouse.tasks) or 1
-    tasks_str = f"{metrics.tasks_completed} / {total_tasks}"
+    total_tasks = metrics.total_tasks or len(env.current_scenario_task_ids) or len(normalized.tasks) or 1
+    tasks_str = f"{min(metrics.tasks_completed, total_tasks)} / {total_tasks}"
+    progress_pct = max(0.0, min(100.0, (metrics.tasks_completed / total_tasks) * 100.0))
+    active_tasks = sum(
+        1 for tid in env.current_scenario_task_ids
+        if (task := env.warehouse.tasks.get(tid)) is not None and not task.is_finished()
+    )
 
     with kpi_c1:
         st.markdown(
@@ -589,6 +635,13 @@ with col_main:
             f"<div class='kpi-card'><div class='kpi-label'>Replans</div><div class='kpi-value'>{metrics.replanning_count}</div></div>",
             unsafe_allow_html=True,
         )
+
+    st.markdown(
+        f"<div class='mission-strip'><span class='live-dot'></span><b style='color:#e2e8f0;'>SCENARIO {normalized.comparison.scenario_id if normalized.comparison else env.current_scenario_id}</b>"
+        f"<span>{min(metrics.tasks_completed,total_tasks)}/{total_tasks} delivered</span><div class='mission-progress'><span style='width:{progress_pct:.1f}%'></span></div>"
+        f"<span>{active_tasks} active</span><span>T+{sim_time:.1f}s</span></div>",
+        unsafe_allow_html=True,
+    )
 
     # 3. Main Hero Visual: Centered Warehouse Floor with Reticle
     st.markdown("<div class='warehouse-wrapper'>", unsafe_allow_html=True)
@@ -630,7 +683,12 @@ with col_main:
     for idx, r in enumerate(normalized.robots):
         col = r_cols[idx % len(r_cols)]
         color = ROBOT_PATH_COLORS[idx % len(ROBOT_PATH_COLORS)]
-        st_upper = (r.availability_state if r.availability_state not in {"", "UNKNOWN"} else r.status).upper()
+        availability = (r.availability_state or "UNKNOWN").upper()
+        raw_status = (r.status or "UNKNOWN").upper()
+        critical_states = {"DISCHARGED", "OFFLINE", "GOING_TO_CHARGER", "CHARGING", "LOW_BATTERY"}
+        st_upper = availability if availability in critical_states else raw_status
+        if st_upper in {"UNKNOWN", "ONLINE", "PLANNING"}:
+            st_upper = raw_status if raw_status not in {"UNKNOWN", "ONLINE", "PLANNING"} else availability
         st_color = {
             "MOVING": "#10b981",
             "WAITING": "#f59e0b",
@@ -642,7 +700,12 @@ with col_main:
 
         pkg_badge = "📦 Loaded" if r.has_package else "⚪ Empty"
         stage_str = r.task_stage.replace("_", " ")
-        bat_display = f"{r.battery:.0f}" if r.battery < 1000 else f"{min(100.0, (r.battery / 10000.0) * 100.0):.0f}%"
+        if r.battery_percentage is not None:
+            bat_display = f"{r.battery_percentage:.0f}%"
+        elif r.battery is not None:
+            bat_display = f"{r.battery:.0f}"
+        else:
+            bat_display = "N/A"
 
         with col:
             st.markdown(
@@ -669,8 +732,16 @@ with col_main:
         ace_t = comp.ace_time
         base_t = comp.baseline_time
         imp = comp.improvement_percentage
-        imp_color = "#10b981" if imp >= 0 else "#ef4444"
-        imp_sign = "+" if imp >= 0 else ""
+        finished = bool(normalized.scenario_finished)
+        if finished:
+            imp_color = "#10b981" if imp >= 0 else "#ef4444"
+            imp_sign = "+" if imp >= 0 else ""
+            performance_text = f"{imp_sign}{imp:.1f}% {'FASTER' if imp >= 0 else 'SLOWER'}"
+            status_text = f"Final improvement: <b style='color:{imp_color};'>{imp_sign}{imp:.1f}%</b>"
+        else:
+            imp_color = "#f59e0b"
+            performance_text = "● LIVE RUN"
+            status_text = "Final improvement: <b style='color:#f59e0b;'>pending until scenario completes</b>"
 
         st.markdown(
             f"""
@@ -680,13 +751,13 @@ with col_main:
                         ⚡ ACE vs Stop-and-Wait Baseline Benchmark (Scenario #{comp.scenario_id})
                     </div>
                     <div style='font-size:13px; font-weight:800; color:{imp_color}; font-family:ui-monospace,monospace;'>
-                        {imp_sign}{imp:.1f}% FASTER
+                        {performance_text}
                     </div>
                 </div>
                 <div style='display:flex; gap:16px; margin-top:6px; font-size:11px; color:#94a3b8;'>
-                    <div>ACE Completion: <b style='color:#38bdf8;'>{ace_t:.2f}s</b> (0 coll)</div>
+                    <div>ACE {'Completion' if finished else 'Elapsed'}: <b style='color:#38bdf8;'>{ace_t:.2f}s</b> ({comp.ace_collisions} coll)</div>
                     <div>Baseline Completion: <b style='color:#f59e0b;'>{base_t:.2f}s</b> ({comp.baseline_collisions} coll)</div>
-                    <div>Improvement: <b style='color:{imp_color};'>{imp_sign}{imp:.1f}%</b></div>
+                    <div>{status_text}</div>
                 </div>
             </div>
             """,
