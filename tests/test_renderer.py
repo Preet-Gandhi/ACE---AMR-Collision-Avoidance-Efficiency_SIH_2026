@@ -399,6 +399,94 @@ class RendererTests(unittest.TestCase):
         self.assertTrue(completed, "Robot should complete task at dropoff and become IDLE.")
         self.assertEqual(env.metrics.get_summary()["tasks_completed"], 1)
 
+    # 22. Edge dropoff cells strictly exclude corners and shelves
+    def test_edge_dropoff_cells_exclude_corners_and_shelves(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+
+        env = WarehouseEnvironment(num_robots=2)
+        expected_corners = {(0, 0), (0, env.HEIGHT - 1), (env.WIDTH - 1, 0), (env.WIDTH - 1, env.HEIGHT - 1)}
+        self.assertEqual(env.CORNERS, expected_corners)
+
+        for corner in env.CORNERS:
+            self.assertNotIn(corner, env.EDGE_DROPOFF_CELLS, f"Corner {corner} must not be in edge dropoffs.")
+
+        for cell in env.EDGE_DROPOFF_CELLS:
+            self.assertNotIn(cell, env.SHELF_BLOCKS, f"Dropoff {cell} must not be a shelf.")
+            # Must be on perimeter
+            x, y = cell
+            is_on_edge = (x == 0 or x == env.WIDTH - 1 or y == 0 or y == env.HEIGHT - 1)
+            self.assertTrue(is_on_edge, f"Cell {cell} should be on the grid perimeter.")
+
+    # 23. Dynamic scenario generation randomized tasks and finish detection
+    def test_scenario_generation_and_finish_detection(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+
+        env = WarehouseEnvironment(num_robots=3)
+        tasks = env.generate_scenario(min_tasks=1, max_tasks=3)
+        self.assertGreaterEqual(len(tasks), 1)
+        self.assertLessEqual(len(tasks), 3)
+
+        for t in tasks:
+            self.assertNotIn(t.pickup, env.CORNERS)
+            self.assertNotIn(t.dropoff, env.CORNERS)
+            self.assertNotIn(t.pickup, env.SHELF_BLOCKS)
+            self.assertNotIn(t.dropoff, env.SHELF_BLOCKS)
+
+        self.assertFalse(env.is_scenario_finished())
+
+    # 24. Pickup marker lifecycle: unpicked -> picked up -> completed
+    def test_pickup_marker_lifecycle_in_svg(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+        from dashboard.snapshot import normalize_snapshot
+        from dashboard.svg_view import SvgWarehouseRenderer
+
+        env = WarehouseEnvironment(num_robots=1)
+        pickup_pos = (2, 4)
+        env.spawn_task(pickup_pos)
+
+        # 1. Unpicked: should have "P1" in SVG
+        snap1 = normalize_snapshot(env.get_snapshot())
+        svg1 = SvgWarehouseRenderer.render_svg(snap1)
+        self.assertIn("P1", svg1)
+        self.assertNotIn("P1📦", svg1)
+
+        # Step until picked up
+        for _ in range(30):
+            env.step()
+            snap = normalize_snapshot(env.get_snapshot())
+            if snap.robots[0].has_package:
+                # 2. Picked up: should have "P1📦" in SVG
+                svg_picked = SvgWarehouseRenderer.render_svg(snap)
+                self.assertIn("P1📦", svg_picked)
+                break
+
+        # Step until finished
+        for _ in range(50):
+            env.step()
+            snap = normalize_snapshot(env.get_snapshot())
+            if snap.robots[0].status == "IDLE":
+                # 3. Finished: pickup badge cleared from floor
+                svg_done = SvgWarehouseRenderer.render_svg(snap)
+                self.assertNotIn("P1📦", svg_done)
+                break
+
+    # 25. Distinct path colors and marker arrows rendered per robot
+    def test_distinct_robot_path_colors(self):
+        from dashboard.warehouse_env import WarehouseEnvironment
+        from dashboard.snapshot import normalize_snapshot
+        from dashboard.svg_view import SvgWarehouseRenderer
+
+        env = WarehouseEnvironment(num_robots=3)
+        env.generate_scenario(min_tasks=3, max_tasks=3)
+        snap = normalize_snapshot(env.get_snapshot())
+        svg = SvgWarehouseRenderer.render_svg(snap)
+
+        # Check arrow markers exist in defs
+        self.assertIn('id="path-arrow-0"', svg)
+        self.assertIn('id="path-arrow-1"', svg)
+        self.assertIn('id="path-arrow-2"', svg)
+
 
 if __name__ == "__main__":
     unittest.main()
+

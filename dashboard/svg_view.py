@@ -11,8 +11,8 @@ class SvgWarehouseRenderer:
     @staticmethod
     def render_svg(
         snapshot: NormalizedSnapshot,
-        cell_size: int = 56,
-        padding: int = 36,
+        cell_size: int = 42,
+        padding: int = 24,
         shelves: Optional[Set[Tuple[int, int]]] = None,
         custom_obstacles: Optional[Set[Tuple[int, int]]] = None,
         dropoff_cells: Optional[List[Tuple[int, int]]] = None,
@@ -45,10 +45,10 @@ class SvgWarehouseRenderer:
             if snapshot.custom_obstacles
             else (set(custom_obstacles) if custom_obstacles else set())
         )
-        dropoff_list = (
-            list(snapshot.dropoff_cells)
-            if snapshot.dropoff_cells
-            else (list(dropoff_cells) if dropoff_cells else [(5, 9), (6, 9), (7, 9), (8, 9)])
+        edge_dropoff_set = (
+            set(snapshot.edge_dropoff_cells)
+            if snapshot.edge_dropoff_cells
+            else (set(dropoff_cells) if dropoff_cells else set(snapshot.dropoff_cells))
         )
 
         # Fallback to raw if snapshot fields were empty
@@ -58,15 +58,14 @@ class SvgWarehouseRenderer:
                 shelves_set = set(raw_snapshot["shelves"])
             if not custom_obs_set and "custom_obstacles" in raw_snapshot:
                 custom_obs_set = set(raw_snapshot["custom_obstacles"])
-            if not dropoff_list and "dropoff_cells" in raw_snapshot:
-                dropoff_list = list(raw_snapshot["dropoff_cells"])
+            if not edge_dropoff_set and "edge_dropoff_cells" in raw_snapshot:
+                edge_dropoff_set = set(raw_snapshot["edge_dropoff_cells"])
 
         if not shelves_set and not custom_obs_set:
             shelves_set = set(snapshot.obstacles)
 
         # Custom obstacles take precedence over racks
         shelves_set = shelves_set - custom_obs_set
-        dropoff_set = set(dropoff_list)
 
         # Selected cell for reticle target
         target_cell = selected_cell or getattr(snapshot, "selected_cell", None)
@@ -80,21 +79,22 @@ class SvgWarehouseRenderer:
             for r in c.robots:
                 conflicted_robots.add(str(r))
 
-        # Pickups (from tasks)
-        pickups: Dict[Tuple[int, int], str] = {}
-        for idx, t in enumerate(snapshot.tasks, 1):
-            if t.pickup and t.pickup not in shelves_set and t.pickup not in custom_obs_set:
-                pickups[t.pickup] = f"P{idx}"
+        ROBOT_PATH_COLORS = ["#38bdf8", "#c084fc", "#34d399", "#fbbf24", "#f472b6"]
 
         svg = [
             f'<svg viewBox="0 0 {svg_w} {svg_h}" width="100%" height="auto" '
             f'preserveAspectRatio="xMidYMid meet" '
             f'xmlns="http://www.w3.org/2000/svg" '
-            f'style="background:{COLOR_BG}; border-radius:10px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; user-select:none; display:block; margin:auto;">',
+            f'style="background:{COLOR_BG}; border-radius:8px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; user-select:none; display:block; margin:auto; max-height:46vh;">',
             '<defs>',
-            '  <marker id="path-arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">',
-            '    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8" />',
-            '  </marker>',
+        ]
+        for i, c in enumerate(ROBOT_PATH_COLORS):
+            svg.append(
+                f'  <marker id="path-arrow-{i}" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
+                f'    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="{c}" />'
+                f'  </marker>'
+            )
+        svg.extend([
             '  <pattern id="hazard-stripes" width="10" height="10" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">',
             '    <line x1="0" y1="0" x2="0" y2="10" stroke="#f97316" stroke-width="3" />',
             '    <line x1="5" y1="0" x2="5" y2="10" stroke="#7c2d12" stroke-width="3" />',
@@ -108,7 +108,7 @@ class SvgWarehouseRenderer:
             '    <feComposite in="SourceGraphic" in2="blur" operator="over" />',
             '  </filter>',
             '</defs>',
-        ]
+        ])
 
         # 1. Coordinate Rulers (Top X labels and Left Y labels)
         for x in range(width):
@@ -123,7 +123,13 @@ class SvgWarehouseRenderer:
                 f'<text x="{padding - 12}" y="{cy}" fill="#64748b" font-size="11" font-weight="600" text-anchor="end">Y={y}</text>'
             )
 
-        # 2. Base Grid, Shelves, Dropoff Station, and Custom Obstacles
+        # Collect ONLY currently active dropoff targets for existing tasks
+        active_dropoffs: Dict[Tuple[int, int], List[str]] = {}
+        for idx, t in enumerate(snapshot.tasks, 1):
+            if t.dropoff and not t.is_finished and t.dropoff not in shelves_set and t.dropoff not in custom_obs_set:
+                active_dropoffs.setdefault(t.dropoff, []).append(f"D{idx}")
+
+        # 2. Base Grid, Shelves, Active Dropoffs, and Custom Obstacles
         for y in range(height):
             for x in range(width):
                 rx = padding + x * cell_size
@@ -139,11 +145,11 @@ class SvgWarehouseRenderer:
                     svg.append(
                         f'<text x="{rx + cell_size/2}" y="{ry + cell_size/2 + 4}" fill="#ffffff" font-size="12" font-weight="bold" text-anchor="middle">⚠️</text>'
                     )
-                elif pos in dropoff_set:
-                    # Common Dropoff Bay Cell
+                elif pos in active_dropoffs:
+                    # ONLY currently active dropoff cells receive the teal/green highlight
                     svg.append(
-                        f'<rect x="{rx}" y="{ry}" width="{cell_size}" height="{cell_size}" '
-                        f'fill="{COLOR_DROPOFF_BG}" stroke="{COLOR_DROPOFF_BORDER}" stroke-width="1.5" opacity="0.85" />'
+                        f'<rect x="{rx+1}" y="{ry+1}" width="{cell_size-2}" height="{cell_size-2}" '
+                        f'rx="3" fill="{COLOR_DROPOFF_BG}" stroke="{COLOR_DROPOFF_BORDER}" stroke-width="1.5" opacity="0.85" />'
                     )
                 elif pos in shelves_set:
                     # Permanent Storage Shelf Rack (████)
@@ -165,24 +171,11 @@ class SvgWarehouseRenderer:
                         f'rx="4" fill="rgba(239, 68, 68, 0.3)" stroke="#ef4444" stroke-width="2" filter="url(#conflict-glow)" />'
                     )
                 else:
-                    # Clean Aisle Floor
+                    # Clean Aisle Floor (includes all normal edge cells)
                     svg.append(
                         f'<rect x="{rx}" y="{ry}" width="{cell_size}" height="{cell_size}" '
                         f'fill="#0b1120" stroke="{COLOR_GRID_LINE}" stroke-width="1" />'
                     )
-
-        # Dropoff Station Banner across the dropoff cells
-        if dropoff_list:
-            min_dx = min(p[0] for p in dropoff_list)
-            max_dx = max(p[0] for p in dropoff_list)
-            dy = dropoff_list[0][1]
-            station_x = padding + min_dx * cell_size
-            station_y = padding + dy * cell_size
-            station_w = (max_dx - min_dx + 1) * cell_size
-            svg.append(
-                f'<text x="{station_x + station_w/2}" y="{station_y + cell_size/2 + 5}" fill="#a7f3d0" '
-                f'font-size="13" font-weight="700" letter-spacing="1.5px" text-anchor="middle">⬇ DROPOFF STATION ⬇</text>'
-            )
 
         # 3. Target Reticle for Selected Cell (Interactive feedback)
         if target_cell is not None and 0 <= target_cell[0] < width and 0 <= target_cell[1] < height:
@@ -200,24 +193,56 @@ class SvgWarehouseRenderer:
             svg.append(f'<path d="M {sx+2} {sy+cell_size-2-c_len} L {sx+2} {sy+cell_size-2} L {sx+2+c_len} {sy+cell_size-2}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
             svg.append(f'<path d="M {sx+cell_size-2-c_len} {sy+cell_size-2} L {sx+cell_size-2} {sy+cell_size-2} L {sx+cell_size-2} {sy+cell_size-2-c_len}" fill="none" stroke="#38bdf8" stroke-width="2.5" />')
 
-        # 4. Pickups (P1, P2...) in aisles
-        for (px, py), p_lbl in pickups.items():
-            cx = padding + px * cell_size + cell_size / 2
-            cy = padding + py * cell_size + cell_size / 2
+        # 4. Active Dropoff Badges (D1, D2...)
+        for (dx, dy), d_lbls in active_dropoffs.items():
+            cx = padding + dx * cell_size + cell_size / 2
+            cy = padding + dy * cell_size + cell_size / 2
+            d_str = "/".join(d_lbls)
+            badge_w = max(32, len(d_str) * 9 + 12)
             svg.append(
-                f'<rect x="{cx - 16}" y="{cy - 12}" width="32" height="24" rx="4" '
-                f'fill="#1e3a8a" stroke="#3b82f6" stroke-width="1.5" />'
+                f'<rect x="{cx - badge_w/2}" y="{cy - 12}" width="{badge_w}" height="24" rx="4" '
+                f'fill="#064e3b" stroke="#10b981" stroke-width="2" />'
             )
             svg.append(
-                f'<text x="{cx}" y="{cy + 5}" fill="#bfdbfe" font-size="11" font-weight="bold" text-anchor="middle">{p_lbl}</text>'
+                f'<text x="{cx}" y="{cy + 5}" fill="#a7f3d0" font-size="11" font-weight="bold" text-anchor="middle">{d_str}</text>'
             )
 
-        # 5. Real Planned Paths (Trail underneath robots)
-        for r in snapshot.robots:
+        # 5. Pickups (P1, P2...) with full lifecycle:
+        # - Unpicked: Blue badge (P1)
+        # - Picked up / in transit: Amber badge (P1📦)
+        # - Completed: Cleared from floor
+        for idx, t in enumerate(snapshot.tasks, 1):
+            if not t.pickup or t.pickup in shelves_set or t.pickup in custom_obs_set:
+                continue
+            if t.is_finished:
+                continue
+            cx = padding + t.pickup[0] * cell_size + cell_size / 2
+            cy = padding + t.pickup[1] * cell_size + cell_size / 2
+            if t.is_picked_up:
+                svg.append(
+                    f'<rect x="{cx - 20}" y="{cy - 12}" width="40" height="24" rx="4" '
+                    f'fill="#78350f" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="3 2" opacity="0.85" />'
+                )
+                svg.append(
+                    f'<text x="{cx}" y="{cy + 4}" fill="#fef3c7" font-size="10" font-weight="bold" text-anchor="middle">P{idx}📦</text>'
+                )
+            else:
+                svg.append(
+                    f'<rect x="{cx - 16}" y="{cy - 12}" width="32" height="24" rx="4" '
+                    f'fill="#1e3a8a" stroke="#3b82f6" stroke-width="2" />'
+                )
+                svg.append(
+                    f'<text x="{cx}" y="{cy + 5}" fill="#bfdbfe" font-size="11" font-weight="bold" text-anchor="middle">P{idx}</text>'
+                )
+
+        # 6. Real Planned Paths (Distinct color per robot, reflecting r.path)
+        for idx, r in enumerate(snapshot.robots):
             r_path = r.path
             if len(r_path) >= 1:
                 full_pts = [r.position] + [p for p in r_path if p != r.position]
                 if len(full_pts) >= 2:
+                    color = ROBOT_PATH_COLORS[idx % len(ROBOT_PATH_COLORS)]
+                    marker_id = f"path-arrow-{idx % len(ROBOT_PATH_COLORS)}"
                     pts = []
                     for px, py in full_pts:
                         cx = padding + px * cell_size + cell_size / 2
@@ -226,8 +251,8 @@ class SvgWarehouseRenderer:
 
                     polyline_str = " ".join(pts)
                     svg.append(
-                        f'<polyline points="{polyline_str}" fill="none" stroke="#38bdf8" stroke-width="2.5" '
-                        f'stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#path-arrow)" opacity="0.75" />'
+                        f'<polyline points="{polyline_str}" fill="none" stroke="{color}" stroke-width="2.5" '
+                        f'stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#{marker_id})" opacity="0.85" />'
                     )
 
         # 6. AMRs — render the authoritative simulator position only.
