@@ -1,0 +1,60 @@
+{
+  "robot_count": 3,
+  "seeds": [
+    42
+  ],
+  "task_counts": [
+    5
+  ],
+  "runs": [
+    {
+      "baseline": {
+        "mode": "baseline",
+        "seed": 42,
+        "robot_count": 3,
+        "task_count": 5,
+        "completion_time": 17.69999999999998,
+        "throughput": 0.282485875706215,
+        "collisions": 0,
+        "deadlocks": 0,
+        "waiting_time": 0.0,
+        "total_distance": 177.0,
+        "replans": 0,
+        "improvement": null
+      },
+      "distributed": {
+        "mode": "distributed",
+        "seed": 42,
+        "robot_count": 3,
+        "task_count": 5,
+        "completion_time": 10.499999999999979,
+        "throughput": 0.47619047619047716,
+        "collisions": 0,
+        "deadlocks": 105,
+        "waiting_time": 0.0,
+        "total_distance": 177.0,
+        "replans": 0,
+        "improvement": 40.67796610169497
+      }
+    }
+  ],
+  "aggregates": [
+    {
+      "robot_count": 3,
+      "task_count": 5,
+      "seed_count": 1,
+      "baseline_mean_time": 17.69999999999998,
+      "baseline_median_time": 17.69999999999998,
+      "distributed_mean_time": 10.499999999999979,
+      "distributed_median_time": 10.499999999999979,
+      "mean_throughput": 0.47619047619047716,
+      "mean_waiting_time": 0.0,
+      "mean_total_distance": 177.0,
+      "mean_replans": 0,
+      "total_collisions": 0,
+      "total_deadlocks": 105,
+      "mean_improvement": 40.67796610169497,
+      "status": "PASS"
+    }
+  ]
+}
