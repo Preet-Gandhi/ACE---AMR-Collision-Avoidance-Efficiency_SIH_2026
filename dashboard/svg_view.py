@@ -230,7 +230,9 @@ class SvgWarehouseRenderer:
                         f'stroke-dasharray="6 3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#path-arrow)" opacity="0.75" />'
                     )
 
-        # 6. Animated AMRs (Moving smoothly along their real paths)
+        # 6. AMRs — render the authoritative simulator position only.
+        # Do NOT animate an independent SVG clock: Streamlit snapshots are
+        # discrete simulation frames, so the visual must always match state.
         for r in snapshot.robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
             st = r.status.upper() if r.status else "UNKNOWN"
@@ -245,62 +247,29 @@ class SvgWarehouseRenderer:
             else:
                 state_color = ROBOT_COLORS["IDLE"]
 
+            cx = padding + r.position[0] * cell_size + cell_size / 2
+            cy = padding + r.position[1] * cell_size + cell_size / 2
             r_radius = 16
 
-            # Check package and task stage
-            has_pkg = getattr(r, "has_package", False)
-            stage = getattr(r, "task_stage", "IDLE")
+            if is_conflicted:
+                svg.append(
+                    f'<circle cx="{cx}" cy="{cy}" r="{r_radius + 5}" fill="none" stroke="#ef4444" stroke-width="3" filter="url(#conflict-glow)" />'
+                )
+            svg.append(
+                f'<circle cx="{cx}" cy="{cy}" r="{r_radius}" fill="{state_color}" stroke="#ffffff" stroke-width="2" />'
+            )
+            svg.append(
+                f'<text x="{cx}" y="{cy + 4.5}" fill="#ffffff" font-size="11" font-weight="bold" text-anchor="middle">{html.escape(r_id)}</text>'
+            )
 
-            # Real planned path traversal
-            full_pts = [r.position] + [p for p in r.path if p != r.position]
-            if len(full_pts) >= 2 and st == "MOVING":
-                d_cmds = [f"M {padding + full_pts[0][0]*cell_size + cell_size/2} {padding + full_pts[0][1]*cell_size + cell_size/2}"]
-                for pt in full_pts[1:]:
-                    d_cmds.append(f"L {padding + pt[0]*cell_size + cell_size/2} {padding + pt[1]*cell_size + cell_size/2}")
-                path_d = " ".join(d_cmds)
-
-                # Duration based on actual path length (approx 1.0s per waypoint)
-                duration = max(2.0, len(full_pts) * 1.0)
-
-                svg.append('<g>')
+            # Package indicator comes from the normalized simulator snapshot.
+            if getattr(r, "has_package", False):
                 svg.append(
-                    f'  <animateMotion dur="{duration:.1f}s" repeatCount="1" fill="freeze" path="{path_d}" '
-                    f'calcMode="linear" />'
-                )
-                if is_conflicted:
-                    svg.append(
-                        f'  <circle cx="0" cy="0" r="{r_radius + 4}" fill="none" stroke="#ef4444" stroke-width="2" filter="url(#conflict-glow)" />'
-                    )
-                svg.append(
-                    f'  <circle cx="0" cy="0" r="{r_radius}" fill="{state_color}" stroke="#ffffff" stroke-width="2" />'
+                    f'<rect x="{cx + 6}" y="{cy - 18}" width="14" height="14" rx="2" fill="#f59e0b" stroke="#b45309" stroke-width="1.5" />'
                 )
                 svg.append(
-                    f'  <text x="0" y="4.5" fill="#ffffff" font-size="11" font-weight="bold" text-anchor="middle">{html.escape(r_id)}</text>'
+                    f'<text x="{cx + 13}" y="{cy - 7}" fill="#78350f" font-size="9" font-weight="bold" text-anchor="middle">📦</text>'
                 )
-                # Package box indicator when transporting
-                if has_pkg:
-                    svg.append('  <rect x="6" y="-18" width="14" height="14" rx="2" fill="#f59e0b" stroke="#b45309" stroke-width="1.5" />')
-                    svg.append('  <text x="13" y="-7" fill="#78350f" font-size="9" font-weight="bold" text-anchor="middle">📦</text>')
-                svg.append('</g>')
-            else:
-                # Stationary robot (WAITING, IDLE, CONFLICT, or at destination)
-                cx = padding + r.position[0] * cell_size + cell_size / 2
-                cy = padding + r.position[1] * cell_size + cell_size / 2
-
-                if is_conflicted:
-                    svg.append(
-                        f'<circle cx="{cx}" cy="{cy}" r="{r_radius + 4}" fill="none" stroke="#ef4444" stroke-width="2" filter="url(#conflict-glow)" />'
-                    )
-                svg.append(
-                    f'<circle cx="{cx}" cy="{cy}" r="{r_radius}" fill="{state_color}" stroke="#ffffff" stroke-width="2" />'
-                )
-                svg.append(
-                    f'<text x="{cx}" y="{cy + 4.5}" fill="#ffffff" font-size="11" font-weight="bold" text-anchor="middle">{html.escape(r_id)}</text>'
-                )
-                # Package box indicator when at pickup/transporting
-                if has_pkg:
-                    svg.append(f'<rect x="{cx + 6}" y="{cy - 18}" width="14" height="14" rx="2" fill="#f59e0b" stroke="#b45309" stroke-width="1.5" />')
-                    svg.append(f'<text x="{cx + 13}" y="{cy - 7}" fill="#78350f" font-size="9" font-weight="bold" text-anchor="middle">📦</text>')
 
         svg.append('</svg>')
         return "\n".join(svg)
