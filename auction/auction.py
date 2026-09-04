@@ -12,9 +12,9 @@ class AuctionResult:
 
 
 class Auction:
-    def __init__(self, network, robots, claim_timeout=0.3):
+    def __init__(self, network, robots, claim_timeout=2):
         self.network, self.robots, self.bids = network, list(robots), {}
-        self.claim_timeout = claim_timeout
+        self.claim_timeout = max(1, int(claim_timeout))
         self.rounds = {}
         self.claims = {}
         self.auction_ids = {}
@@ -112,7 +112,7 @@ class Auction:
     def run_auction(self, task, verbose=True):
         if not task.is_available(): return AuctionResult(None, self.bids.get(task.task_id, []))
         self.announce_task(task)
-        bids = [r.calculate_bid(task) for r in self.robots if r.can_bid(task)]
+        bids = [r.calculate_bid(task) for r in self.robots if r.is_online() and r.can_bid(task)]
         self.bids[task.task_id] = bids
         winner = self.select_winner(bids)
         if winner: self.broadcast_winner(task, winner.robot_id)
@@ -126,5 +126,7 @@ class Auction:
         """Publish a task; robots calculate and resolve the winner themselves."""
         if not task.is_available():
             return None
+        if task.task_id in self.rounds and task.status == TaskStatus.AUCTIONING and self.auction_ids.get(task.task_id) is not None:
+            return self.auction_ids[task.task_id], self.rounds[task.task_id]
         auction_id, round_number = self.announce_task(task)
         return auction_id, round_number

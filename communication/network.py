@@ -12,4 +12,11 @@ class Network:
             if robot_id != sender_id: self.send(sender_id, robot_id, message)
     def receive(self, robot_id):
         messages = list(self.queues[robot_id]); self.queues[robot_id].clear(); return messages
-    def get_connected_robots(self, robot_id): return [x for x in self.peers if x != robot_id]
+    def get_connected_robots(self, robot_id):
+        return [
+            peer_id
+            for peer_id, robot in self.peers.items()
+            if peer_id != robot_id and robot.is_online()
+        ]
+    def get_all_robots(self, robot_id=None):
+        return [peer_id for peer_id in self.peers if peer_id != robot_id]

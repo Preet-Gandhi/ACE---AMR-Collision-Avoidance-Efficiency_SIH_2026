@@ -1,4 +1,5 @@
 import heapq
+from functools import lru_cache
 
 
 class AStarPlanner:
@@ -10,6 +11,32 @@ class AStarPlanner:
 
     def get_neighbors(self, position):
         return self.warehouse.get_neighbors(position)
+
+    @lru_cache(maxsize=4096)
+    def static_distance(self, start, goal):
+        start = tuple(start)
+        goal = tuple(goal)
+        if start == goal:
+            return 0
+        if not self.warehouse.is_walkable(start) or not self.warehouse.is_walkable(goal):
+            return float("inf")
+        frontier = [(0, start)]
+        cost = {start: 0}
+        while frontier:
+            current_cost, current = heapq.heappop(frontier)
+            if current == goal:
+                return current_cost
+            if current_cost != cost[current]:
+                continue
+            for neighbor in self.get_neighbors(current):
+                neighbor = tuple(neighbor)
+                if not self.warehouse.is_walkable(neighbor):
+                    continue
+                next_cost = current_cost + 1
+                if next_cost < cost.get(neighbor, float("inf")):
+                    cost[neighbor] = next_cost
+                    heapq.heappush(frontier, (next_cost, neighbor))
+        return float("inf")
 
     def find_path(
         self,

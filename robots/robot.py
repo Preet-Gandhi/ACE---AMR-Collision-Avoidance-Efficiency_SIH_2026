@@ -8,7 +8,7 @@ from robots.state import RobotState
 
 
 class Robot:
-    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0, distributed=False, reservation_lease=20, reservation_horizon=20, obstacle_sensor_radius=2, obstacle_safety_radius=0, battery_consumption_per_move=1.0, offline_battery_cutoff=0.0, charging_station=None, charging_rate_per_step=1.0, workload_penalty=5.0):
+    def __init__(self, robot_id, start_position, warehouse, planner, network, reservation_table, battery=100.0, robot_speed=1.0, congestion_penalty=2.0, priority_bonus=1.0, invalid_bid_penalty=1_000_000.0, orca_enabled=False, orca_neighbor_distance=3.0, orca_time_horizon=2.0, orca_robot_radius=0.5, orca_max_speed=1.0, distributed=False, reservation_lease=8, reservation_horizon=6, obstacle_sensor_radius=2, obstacle_safety_radius=0, battery_consumption_per_move=1.0, offline_battery_cutoff=0.0, charging_station=None, charging_rate_per_step=1.0, workload_penalty=5.0, wait_threshold=5.0, replan_cooldown=2.0):
         self.robot_id, self.warehouse, self.planner = robot_id, warehouse, planner
         self.network, self.reservation_table = network, reservation_table
         self.state, self.known_states, self.tasks = RobotState(robot_id, tuple(start_position), battery=battery), {}, {}
@@ -26,9 +26,16 @@ class Robot:
         self.waiting_time = 0.0
         self.distance_travelled = 0.0
         self.last_priority = 0.0
-        self.wait_threshold = 5.0
+        self.wait_threshold = float(wait_threshold)
+        self.replan_cooldown = float(replan_cooldown)
+        self.last_replan_time = -1_000_000.0
         self.blockage_waiting = 0.0
         self.replan_count = 0
+        self.blocked_by_robot = False
+        self.blocked_by_reservation = False
+        self.idle_bonus = 10.0
+        self._battery_route_check_needed = True
+        self._cached_should_charge = False
         self.auction = None
         self.distributed = distributed
         self.reservation_lease = reservation_lease
@@ -60,6 +67,9 @@ class Robot:
         self._orca_target = None
         self._orca_result = None
         self._orca_preferred_velocity = (0.0, 0.0)
+        self._last_broadcast_position = tuple(self.state.position)
+        self._last_broadcast_status = self.state.status
+        self._last_broadcast_battery = self.state.battery
         network.register(self)
         self.current_time = 0
         reservation_table.register_priority(robot_id, 0)
@@ -77,6 +87,12 @@ class Robot:
         if start == goal:
             return [tuple(start)]
         return self.planner.find_path(tuple(start), tuple(goal)) or []
+
+    def _static_distance(self, start, goal):
+        if hasattr(self.planner, "static_distance"):
+            return self.planner.static_distance(tuple(start), tuple(goal))
+        path = self._find_path(start, goal)
+        return len(path) - 1 if path else float("inf")
 
     def energy_required_to_charge(self):
         if self.charging_station is None:
@@ -269,6 +285,19 @@ class Robot:
     def _is_movable(self):
         return self.state.availability_state == "GOING_TO_CHARGER" or self.is_online()
 
+    def _handle_wait(self, reason, duration=0.1):
+        self.state.status = "WAITING"
+        self.waiting_time += duration
+        self.blockage_waiting += duration
+        self.blocked_by_robot = reason == "robot"
+        self.blocked_by_reservation = reason == "reservation"
+        return False
+
+    def _should_replan(self):
+        if self.current_time - self.last_replan_time < self.replan_cooldown:
+            return False
+        return self.blockage_waiting >= self.wait_threshold or self.waiting_time >= self.wait_threshold
+
     def _projected_position(self):
         if self.task_queue: return self.task_queue[-1].dropoff
         if self.state.current_task_id is not None: return self.tasks[self.state.current_task_id].dropoff
@@ -277,22 +306,48 @@ class Robot:
     def calculate_bid(self, task):
         if not self.is_online():
             return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+
         projected = self._projected_position()
-        to_pickup = [] if task.package_picked_up else self._find_path(projected, task.pickup)
-        to_dropoff = self._find_path(task.pickup if not task.package_picked_up else projected, task.dropoff)
-        if not to_dropoff or (not task.package_picked_up and not to_pickup):
-            return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
-        route = to_dropoff if task.package_picked_up else to_pickup + to_dropoff[1:]
-        distance = len(route) - 1
+
+        if task.package_picked_up:
+            to_dropoff = self._find_path(projected, task.dropoff)
+            if not to_dropoff:
+                return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+            route = to_dropoff
+        else:
+            to_pickup = self._find_path(projected, task.pickup)
+            if not to_pickup:
+                return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+            to_dropoff = self._find_path(task.pickup, task.dropoff)
+            if not to_dropoff:
+                return Bid(self.robot_id, task.task_id, self.invalid_bid_penalty, valid=False)
+            route = to_pickup + to_dropoff[1:]
+
+        distance = max(0, len(route) - 1)
         time_cost = distance / self.robot_speed if self.robot_speed > 0 else self.invalid_bid_penalty
-        congestion = self.reservation_table.count_conflicts(route, self.robot_id) * self.congestion_penalty
-        required_energy = self.energy_required_for_task(task)
-        battery_cost = 0.0 if self.state.battery >= required_energy else self.invalid_bid_penalty
+        congestion = self.reservation_table.count_conflicts(route, self.robot_id, self.current_time) * self.congestion_penalty
+        required_energy = self._path_energy(route)
+        if self.charging_station is not None:
+            charger_path = self._find_path(task.dropoff, self.charging_station)
+            if not charger_path:
+                required_energy = float("inf")
+            else:
+                required_energy += self._path_energy(charger_path)
+        valid = self.state.battery >= required_energy and self.robot_speed > 0
+        battery_cost = 0.0 if valid else self.invalid_bid_penalty
         workload = int(self.state.current_task_id is not None) + len(self.task_queue)
         workload_cost = workload * self.workload_penalty
-        valid = self.state.battery >= required_energy and self.robot_speed > 0
-        return Bid(self.robot_id, task.task_id, distance, time_cost, battery_cost, congestion,
-                   task.priority * self.priority_bonus, workload_cost=workload_cost, valid=valid)
+        return Bid(
+            self.robot_id,
+            task.task_id,
+            distance,
+            time_cost,
+            battery_cost,
+            congestion,
+            task.priority * self.priority_bonus,
+            workload_cost=workload_cost,
+            valid=valid,
+        )
 
     def accept_task(self, task):
         if task.task_id in self.tasks or task.task_id in {t.task_id for t in self.task_queue}: return False
@@ -411,7 +466,7 @@ class Robot:
                 "priority": priority,
                 "expected": set(self.network.get_connected_robots(self.robot_id)),
                 "grants": set(),
-                "deadline": self.current_time + max(0.3, self.reservation_lease / 10),
+                "deadline": self.current_time + 4,
             }
             self._request_reservation(reservation_path, priority)
             if not self.pending_reservations[version]["expected"]:
@@ -441,7 +496,7 @@ class Robot:
             self.last_plan_reserved = False
             self.state.clear_path()
             self.state.status = "WAITING"
-            self.reservation_retry_until = self.current_time + 1
+            self.reservation_retry_until = self.current_time + self.replan_cooldown
             return False
         self.last_plan_reserved = True
         self.state.set_path(path[1:])
@@ -456,7 +511,7 @@ class Robot:
             self.last_plan_reserved = False
             self.state.clear_path()
             self.state.status = "WAITING"
-            self.reservation_retry_until = self.current_time + 1
+            self.reservation_retry_until = self.current_time + self.replan_cooldown
 
     def _local_obstacle_blocks(self):
         """Return locally observed obstacle cells expanded by the safety radius."""
@@ -568,7 +623,7 @@ class Robot:
                  "auction_id": payload.get("auction_id"), "round": round_number}
         if self.auction is not None:
             self.auction.claims[task_id] = (winner.robot_id, claim["auction_id"], round_number)
-        claim_timeout = getattr(self.auction, "claim_timeout", 0.3)
+        claim_timeout = max(1, int(getattr(self.auction, "claim_timeout", 2)))
         deadline = self.current_time if not self.network.get_connected_robots(self.robot_id) else self.current_time + claim_timeout
         self.pending_claims[task_id] = (winner.robot_id, round_number, deadline)
         if winner.robot_id == self.robot_id:
@@ -702,7 +757,7 @@ class Robot:
             if task and task.is_available():
                 self.pending_claims[task.task_id] = (
                     message.payload.get("robot_id"), int(message.payload.get("round", 0)),
-                    self.current_time + getattr(self.auction, "claim_timeout", 0.3))
+                    self.current_time + max(1, int(getattr(self.auction, "claim_timeout", 2))))
         elif message.message_type == MessageType.RESERVATION_REQUEST:
             payload = message.payload
             path = [tuple(p) for p in payload.get("path", [])]
@@ -750,10 +805,14 @@ class Robot:
         if self.state.current_task_id is not None and self.state.get_next_position() is None:
             planned = self.plan_path()
             if not planned:
-                self.blockage_waiting += 0.1
-                if self.blockage_waiting >= self.wait_threshold: self.fail_current_task()
+                self._handle_wait("reservation")
+                if self.blockage_waiting >= self.wait_threshold and not self.state.path:
+                    self.fail_current_task()
+                    return
+                if self._should_replan():
+                    self.replan()
             elif not self.last_plan_reserved and not self.pending_reservations:
-                self.blockage_waiting += 0.1
+                self._handle_wait("reservation")
 
     def _observe_local_obstacles(self):
         """Detect dynamic obstacles within the robot's local Manhattan sensor range."""
@@ -829,22 +888,15 @@ class Robot:
         # bug must never allow a robot to drive into another robot.
         blocked_positions = {tuple(p) for p in (blocked_positions or [])}
         if tuple(nxt) in blocked_positions:
-            self.state.status = "WAITING"
-            self.waiting_time += 0.1
-            self.blockage_waiting += 0.1
-            # Physical occupancy is not represented by a reservation owner.
-            # Replan after sustained blockage so the robot can route around
-            # a parked/completed AMR or select another delivery bay.
-            if self.waiting_time >= self.wait_threshold:
+            self._handle_wait("robot")
+            if self._should_replan():
                 self.replan()
             return False
         reservation_time = int(self.current_time) + 1
         owner = self.reservation_table.get_owner(nxt, reservation_time)
         if owner not in (None, self.robot_id):
-            self.state.status = "WAITING"
-            self.waiting_time += 0.1
-            self.blockage_waiting += 0.1
-            if self.waiting_time >= self.wait_threshold:
+            self._handle_wait("reservation")
+            if self._should_replan():
                 self.replan()
             if self.blockage_waiting >= self.wait_threshold and not self.is_path_valid():
                 self.fail_current_task()
@@ -856,13 +908,11 @@ class Robot:
         if owner is None:
             previous = tuple(self.state.position)
             if not self.reservation_table.reserve(self.robot_id, nxt, reservation_time):
-                self.state.status = "WAITING"
-                self.waiting_time += 0.1
+                self._handle_wait("reservation")
                 return False
             if not self.reservation_table.reserve_edge(self.robot_id, previous, tuple(nxt), reservation_time):
                 self.reservation_table.release(self.robot_id)
-                self.state.status = "WAITING"
-                self.waiting_time += 0.1
+                self._handle_wait("reservation")
                 return False
         self.state.update_velocity((nxt[0] - self.state.position[0], nxt[1] - self.state.position[1]))
         self.state.update_position(nxt)
@@ -949,7 +999,11 @@ class Robot:
     def replan(self):
         if self.state.current_task_id is None:
             return []
+        if self.current_time - self.last_replan_time < self.replan_cooldown:
+            return []
+        self.last_replan_time = self.current_time
         self.replan_count += 1
+        self.blockage_waiting = 0.0
         self.reservation_table.release(self.robot_id)
         self.state.clear_path()
         return self.plan_path()
@@ -1005,13 +1059,9 @@ class Robot:
         simulation-time debounce prevents the same robot from thrashing when
         two reservations keep changing on consecutive ticks.
         """
-        self.state.status = "WAITING"
-        self.waiting_time += duration
+        self._handle_wait("robot", duration)
 
-        # Replan at most once every 0.2 simulated seconds. This is fast enough
-        # to react within two 0.1 s simulation ticks while preventing repeated
-        # A* calls from the same unchanged conflict.
-        if self.current_time - self.last_conflict_replan_time < 0.2:
+        if self.current_time - self.last_conflict_replan_time < self.replan_cooldown:
             return False
 
         self.last_conflict_replan_time = self.current_time

@@ -13,12 +13,14 @@ class Config:
     offline_battery_cutoff: float = 0.0
     charging_rate_per_step: float = 1.0
     workload_penalty: float = 5.0
-    reservation_horizon: int = 20
+    reservation_horizon: int = 6
+    reservation_lease: int = 8
+    wait_threshold: float = 5.0
+    replan_cooldown: float = 2.0
     deadlock_timeout: float = 5.0
     collision_distance: float = 0.0
     auction_interval: float = 1.0
     distributed_auction: bool = True
-    reservation_lease: int = 20
     obstacle_sensor_radius: int = 2
     obstacle_safety_radius: int = 0
     random_seed: int = 42

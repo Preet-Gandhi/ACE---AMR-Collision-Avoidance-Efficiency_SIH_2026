@@ -319,7 +319,7 @@ class WarehouseEnvironment:
             for i in range(self.num_robots)
         ]
 
-        self.auction = Auction(self.network, self.robots, claim_timeout=0.0)
+        self.auction = Auction(self.network, self.robots, claim_timeout=2)
         for r in self.robots:
             r.auction = self.auction
 
@@ -447,7 +447,7 @@ class WarehouseEnvironment:
             for i in range(self.num_robots)
         ]
 
-        b_auction = Auction(b_network, b_robots, claim_timeout=0.0)
+        b_auction = Auction(b_network, b_robots, claim_timeout=2)
         for r in b_robots:
             r.auction = b_auction
 

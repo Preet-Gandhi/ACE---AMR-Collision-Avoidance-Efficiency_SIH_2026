@@ -17,6 +17,8 @@ class ReservationTable:
         self._leases = {}
         self._edge_leases = {}
         self._priorities = {}
+        self._robot_reservations = {}
+        self._robot_edge_reservations = {}
 
     @staticmethod
     def _pos(position):
@@ -30,6 +32,7 @@ class ReservationTable:
             return False
 
         self._reservations[key] = robot_id
+        self._robot_reservations.setdefault(robot_id, set()).add(key)
         if lease_until is not None:
             self._leases[key] = float(lease_until)
         return True
@@ -52,22 +55,23 @@ class ReservationTable:
             return False
 
         self._edge_reservations[key] = robot_id
+        self._robot_edge_reservations.setdefault(robot_id, set()).add(key)
         if lease_until is not None:
             self._edge_leases[key] = float(lease_until)
         return True
 
     def release(self, robot_id):
-        self._reservations = {
-            k: v for k, v in self._reservations.items()
-            if v != robot_id
-        }
+        vertices = self._robot_reservations.pop(robot_id, set())
+        for key in vertices:
+            if self._reservations.get(key) == robot_id:
+                self._reservations.pop(key, None)
+            self._leases.pop(key, None)
 
-        self._edge_reservations = {
-            k: v for k, v in self._edge_reservations.items()
-            if v != robot_id
-        }
-        self._leases = {k: v for k, v in self._leases.items() if k in self._reservations}
-        self._edge_leases = {k: v for k, v in self._edge_leases.items() if k in self._edge_reservations}
+        edges = self._robot_edge_reservations.pop(robot_id, set())
+        for key in edges:
+            if self._edge_reservations.get(key) == robot_id:
+                self._edge_reservations.pop(key, None)
+            self._edge_leases.pop(key, None)
 
     def is_reserved(self, position, timestep):
         return (
@@ -92,9 +96,7 @@ class ReservationTable:
     def get_robot_reservations(self, robot_id):
         return [
             Reservation(robot_id, position, timestep)
-            for (position, timestep), owner
-            in self._reservations.items()
-            if owner == robot_id
+            for (position, timestep) in sorted(self._robot_reservations.get(robot_id, set()), key=lambda item: item[1])
         ]
 
     def get_reservations_at(self, timestep):
@@ -113,30 +115,50 @@ class ReservationTable:
     def release_expired(self, timestep):
         timestep = int(timestep)
 
-        self._reservations = {
-            key: owner
-            for key, owner in self._reservations.items()
-            if key[1] >= timestep
-        }
+        expired_vertices = [key for key in self._reservations if key[1] < timestep]
+        for key in expired_vertices:
+            owner = self._reservations.pop(key, None)
+            self._leases.pop(key, None)
+            if owner is not None:
+                owned = self._robot_reservations.get(owner)
+                if owned is not None:
+                    owned.discard(key)
+                    if not owned:
+                        self._robot_reservations.pop(owner, None)
 
-        self._edge_reservations = {
-            key: owner
-            for key, owner in self._edge_reservations.items()
-            if key[2] >= timestep
-        }
-        self._leases = {key: expiry for key, expiry in self._leases.items() if key in self._reservations}
-        self._edge_leases = {key: expiry for key, expiry in self._edge_leases.items() if key in self._edge_reservations}
+        expired_edges = [key for key in self._edge_reservations if key[2] < timestep]
+        for key in expired_edges:
+            owner = self._edge_reservations.pop(key, None)
+            self._edge_leases.pop(key, None)
+            if owner is not None:
+                owned = self._robot_edge_reservations.get(owner)
+                if owned is not None:
+                    owned.discard(key)
+                    if not owned:
+                        self._robot_edge_reservations.pop(owner, None)
 
     def release_expired_leases(self, current_time):
         """Release reservations whose owner failed to renew its lease."""
-        expired_vertices = {key for key, expiry in self._leases.items() if expiry <= current_time}
-        expired_edges = {key for key, expiry in self._edge_leases.items() if expiry <= current_time}
+        expired_vertices = [key for key, expiry in self._leases.items() if expiry <= current_time]
+        expired_edges = [key for key, expiry in self._edge_leases.items() if expiry <= current_time]
         for key in expired_vertices:
-            self._reservations.pop(key, None)
+            owner = self._reservations.pop(key, None)
+            self._leases.pop(key, None)
+            if owner is not None:
+                owned = self._robot_reservations.get(owner)
+                if owned is not None:
+                    owned.discard(key)
+                    if not owned:
+                        self._robot_reservations.pop(owner, None)
         for key in expired_edges:
-            self._edge_reservations.pop(key, None)
-        self._leases = {key: expiry for key, expiry in self._leases.items() if key in self._reservations}
-        self._edge_leases = {key: expiry for key, expiry in self._edge_leases.items() if key in self._edge_reservations}
+            owner = self._edge_reservations.pop(key, None)
+            self._edge_leases.pop(key, None)
+            if owner is not None:
+                owned = self._robot_edge_reservations.get(owner)
+                if owned is not None:
+                    owned.discard(key)
+                    if not owned:
+                        self._robot_edge_reservations.pop(owner, None)
 
     def path_conflicts(self, robot_id, path, start_time=0):
         conflicts = []
@@ -217,11 +239,12 @@ class ReservationTable:
 
         return conflicts[0] if conflicts else None
 
-    def count_conflicts(self, path, robot_id=None):
+    def count_conflicts(self, path, robot_id=None, start_time=0):
         return len(
             self.path_conflicts(
                 robot_id,
                 path,
+                start_time,
             )
         )
 
@@ -263,8 +286,13 @@ class ReservationTable:
         )
 
         snapshot = (
-            self._reservations.copy(), self._edge_reservations.copy(),
-            self._leases.copy(), self._edge_leases.copy(), self._priorities.copy()
+            self._reservations.copy(),
+            self._edge_reservations.copy(),
+            self._leases.copy(),
+            self._edge_leases.copy(),
+            self._priorities.copy(),
+            {robot_id: keys.copy() for robot_id, keys in self._robot_reservations.items()},
+            {robot_id: keys.copy() for robot_id, keys in self._robot_edge_reservations.items()},
         )
 
         if conflicts:
@@ -349,8 +377,16 @@ class ReservationTable:
         return True
 
     def _restore(self, snapshot):
-        self._reservations, self._edge_reservations, self._leases, self._edge_leases, self._priorities = (
-            value.copy() for value in snapshot
+        (
+            self._reservations,
+            self._edge_reservations,
+            self._leases,
+            self._edge_leases,
+            self._priorities,
+            self._robot_reservations,
+            self._robot_edge_reservations,
+        ) = (
+            value.copy() if hasattr(value, "copy") else value for value in snapshot
         )
 
     def _rollback(

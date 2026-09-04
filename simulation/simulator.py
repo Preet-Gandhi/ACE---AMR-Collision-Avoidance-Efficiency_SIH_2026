@@ -93,7 +93,7 @@ class Simulator:
         # overlap without introducing a permanent one-cell-following deadlock.
         movement_order = sorted(
             [robot for robot in self.robots if robot.is_online()],
-            key=lambda item: (-item.calculate_priority(), item.robot_id),
+            key=lambda robot: (robot.state.status != "MOVING", -robot.calculate_priority(), robot.robot_id),
         )
         positions_before = {robot.robot_id: tuple(robot.state.position) for robot in self.robots}
         unmoved_ids = {robot.robot_id for robot in movement_order}
@@ -142,9 +142,10 @@ class Simulator:
 
         # Count a physical overlap once per robot pair, not once per frame.
         current_collision_pairs = {tuple(sorted((a.robot_id, b.robot_id))) for a, b in collisions}
+        robots_by_id = {robot.robot_id: robot for robot in self.robots}
         for pair in current_collision_pairs - self._active_collision_pairs:
-            a = next(r for r in self.robots if r.robot_id == pair[0])
-            b = next(r for r in self.robots if r.robot_id == pair[1])
+            a = robots_by_id[pair[0]]
+            b = robots_by_id[pair[1]]
             self.metrics.record_collision(a, b)
         self._active_collision_pairs = current_collision_pairs
 
@@ -157,8 +158,6 @@ class Simulator:
         # Treating every geometric intersection as a live conflict creates
         # false deadlocks and was the main source of the old simulation
         # freezing on shared aisles.
-        path_conflicts = self.collision_detector.detect_all_path_conflicts(self.robots)
-
         # --------------------------------------------------------------
         # IMMEDIATE CONFLICT RESOLUTION
         # --------------------------------------------------------------
@@ -173,11 +172,11 @@ class Simulator:
         # protection.
         current_path_conflict_pairs = {
             tuple(sorted((a.robot_id, b.robot_id)))
-            for a, b in path_conflicts
+            for a, b in self.collision_detector.detect_all_path_conflicts(self.robots)
         }
         new_conflict_pairs = current_path_conflict_pairs - self._last_path_conflict_pairs
 
-        for a, b in path_conflicts:
+        for a, b in self.collision_detector.detect_all_path_conflicts(self.robots):
             if tuple(sorted((a.robot_id, b.robot_id))) not in new_conflict_pairs:
                 continue
             candidates = [r for r in (a, b) if r.is_online() and r.state.current_task_id is not None]
@@ -387,12 +386,20 @@ class Simulator:
             robot.blockage_waiting = 0.0
             robot.replan_count = 0
             robot.last_conflict_replan_time = -1_000_000.0
+            robot.last_replan_time = -1_000_000.0
+            robot.blocked_by_robot = False
+            robot.blocked_by_reservation = False
             robot.pending_reservations.clear()
             robot.reservation_leases.clear()
             robot.last_plan_reserved = False
+            robot._battery_route_check_needed = True
+            robot._cached_should_charge = False
             robot._orca_target = None
             robot._orca_result = None
             robot.state.velocity = (0, 0)
+            robot._last_broadcast_position = tuple(robot.state.position)
+            robot._last_broadcast_status = robot.state.status
+            robot._last_broadcast_battery = robot.state.battery
 
         # Reset deadlock bookkeeping.
         self._counted_deadlock_cycles.clear()

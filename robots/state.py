@@ -57,7 +57,7 @@ class RobotState:
 
         if self.path:
             self.status = "MOVING"
-        else:
+        elif self.current_task_id is not None:
             self.status = "WAITING"
 
     def clear_path(self):
