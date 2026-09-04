@@ -13,6 +13,8 @@ class RobotView:
     battery: Optional[float] = None
     current_task_id: Optional[Any] = None
     path: Tuple[Tuple[int, int], ...] = ()
+    has_package: bool = False
+    task_stage: str = "IDLE"
 
 
 @dataclass(frozen=True)
@@ -66,41 +68,71 @@ class NormalizedSnapshot:
     reservations: Tuple[ReservationView, ...] = ()
     conflicts: Tuple[ConflictView, ...] = ()
     obstacles: Tuple[Tuple[int, int], ...] = ()
+    shelves: Tuple[Tuple[int, int], ...] = ()
+    custom_obstacles: Tuple[Tuple[int, int], ...] = ()
+    dropoff_cells: Tuple[Tuple[int, int], ...] = ()
+    dropoff_station: Optional[Tuple[int, int]] = None
+    selected_cell: Optional[Tuple[int, int]] = None
     metrics: MetricView = field(default_factory=MetricView)
     timestep: Optional[int] = None
     time: Optional[float] = None
+    raw: Dict[str, Any] = field(default_factory=dict)
 
 
 class SnapshotNormalizer:
     """Safely normalizes arbitrary snapshot dictionaries into read-only views."""
 
     @staticmethod
+    def _extract_pos_list(raw_list: Any) -> Tuple[Tuple[int, int], ...]:
+        if not raw_list or not isinstance(raw_list, (list, tuple, set)):
+            return ()
+        results = []
+        for item in raw_list:
+            pos = SnapshotNormalizer._to_pos(item)
+            if pos is not None:
+                results.append(pos)
+        return tuple(sorted(set(results)))
+
+    @staticmethod
     def normalize(snapshot: Any) -> NormalizedSnapshot:
         if not isinstance(snapshot, dict):
             snapshot = {}
 
-        # 1. Obstacles
+        # 1. Obstacles, Shelves, and Custom Obstacles
         obstacles = SnapshotNormalizer._extract_obstacles(snapshot)
+        shelves = SnapshotNormalizer._extract_pos_list(snapshot.get("shelves"))
+        custom_obstacles = SnapshotNormalizer._extract_pos_list(snapshot.get("custom_obstacles"))
 
-        # 2. Robots
+        # Merge shelves and custom obstacles into obstacles set if provided
+        for p in shelves:
+            obstacles.add(p)
+        for p in custom_obstacles:
+            obstacles.add(p)
+
+        # 2. Dropoff configuration
+        dropoff_cells = SnapshotNormalizer._extract_pos_list(snapshot.get("dropoff_cells"))
+        dropoff_station = SnapshotNormalizer._to_pos(snapshot.get("dropoff_station"))
+        selected_cell = SnapshotNormalizer._to_pos(snapshot.get("selected_cell"))
+
+        # 3. Robots
         robots = SnapshotNormalizer._extract_robots(snapshot)
 
-        # 3. Tasks
+        # 4. Tasks
         tasks = SnapshotNormalizer._extract_tasks(snapshot)
 
-        # 4. Paths
+        # 5. Paths
         paths = SnapshotNormalizer._extract_paths(snapshot, robots)
 
-        # 5. Reservations
+        # 6. Reservations
         reservations = SnapshotNormalizer._extract_reservations(snapshot)
 
-        # 6. Conflicts
+        # 7. Conflicts
         conflicts = SnapshotNormalizer._extract_conflicts(snapshot)
 
-        # 7. Metrics
+        # 8. Metrics
         metrics = SnapshotNormalizer._extract_metrics(snapshot, tasks)
 
-        # 8. Grid size
+        # 9. Grid size
         grid_size = SnapshotNormalizer._determine_grid_size(
             snapshot, obstacles, robots, paths, reservations
         )
@@ -119,9 +151,15 @@ class SnapshotNormalizer:
             reservations=tuple(reservations),
             conflicts=tuple(conflicts),
             obstacles=tuple(sorted(obstacles)),
+            shelves=shelves,
+            custom_obstacles=custom_obstacles,
+            dropoff_cells=dropoff_cells,
+            dropoff_station=dropoff_station,
+            selected_cell=selected_cell,
             metrics=metrics,
             timestep=timestep,
             time=float(time_val) if time_val is not None else None,
+            raw=dict(snapshot) if isinstance(snapshot, dict) else {},
         )
 
     @staticmethod
@@ -189,6 +227,8 @@ class SnapshotNormalizer:
                 path_list = [
                     p for p in (SnapshotNormalizer._to_pos(pt) for pt in raw_path) if p is not None
                 ]
+                has_package = bool(item.get("has_package", False))
+                task_stage = str(item.get("task_stage", "IDLE"))
                 robots.append(
                     RobotView(
                         robot_id=r_id,
@@ -197,6 +237,8 @@ class SnapshotNormalizer:
                         battery=battery,
                         current_task_id=task_id,
                         path=tuple(path_list),
+                        has_package=has_package,
+                        task_stage=task_stage,
                     )
                 )
             else:
@@ -219,6 +261,8 @@ class SnapshotNormalizer:
                 path_list = [
                     p for p in (SnapshotNormalizer._to_pos(pt) for pt in raw_path) if p is not None
                 ]
+                has_package = bool(getattr(item, "has_package", getattr(state, "has_package", False) if state else False))
+                task_stage = str(getattr(item, "task_stage", getattr(state, "task_stage", "IDLE") if state else "IDLE"))
                 robots.append(
                     RobotView(
                         robot_id=r_id,
@@ -227,6 +271,8 @@ class SnapshotNormalizer:
                         battery=float(battery) if battery is not None else None,
                         current_task_id=task_id,
                         path=tuple(path_list),
+                        has_package=has_package,
+                        task_stage=task_stage,
                     )
                 )
 

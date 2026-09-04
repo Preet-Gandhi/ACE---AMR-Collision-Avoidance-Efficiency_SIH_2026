@@ -19,7 +19,10 @@ def run():
         "--server.port=8501",
         "--browser.gatherUsageStats=false",
     ]
-    sys.exit(stcli.main())
+    try:
+        sys.exit(stcli.main())
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
 if __name__ == "__main__":
