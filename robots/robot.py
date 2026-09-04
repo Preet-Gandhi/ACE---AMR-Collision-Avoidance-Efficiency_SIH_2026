@@ -1,3 +1,4 @@
+
 from auction.bid import Bid
 from auction.task import Task, TaskStatus
 import math
@@ -47,6 +48,10 @@ class Robot:
         self.reservation_leases = {}
         self.pending_reservations = {}
         self.reservation_retry_until = 0.0
+        # Simulation-time debounce for conflict-triggered replanning.
+        # Keep this short: a blocked AMR should reroute almost immediately,
+        # not sit waiting for several seconds of simulated time.
+        self.last_conflict_replan_time = -1_000_000.0
         self.robot_speed, self.congestion_penalty, self.priority_bonus, self.invalid_bid_penalty = robot_speed, congestion_penalty, priority_bonus, invalid_bid_penalty
         self.orca_enabled = orca_enabled
         self.orca_robot_radius = orca_robot_radius
@@ -993,5 +998,35 @@ class Robot:
         return True
 
     def handle_conflict(self, duration=0.1):
+        """Resolve an imminent reservation conflict without multi-second waiting.
+
+        A conflict is a planning event, not a reason to sleep for several
+        simulation ticks. Replan the yielding robot immediately. A very short
+        simulation-time debounce prevents the same robot from thrashing when
+        two reservations keep changing on consecutive ticks.
+        """
         self.state.status = "WAITING"
         self.waiting_time += duration
+
+        # Replan at most once every 0.2 simulated seconds. This is fast enough
+        # to react within two 0.1 s simulation ticks while preventing repeated
+        # A* calls from the same unchanged conflict.
+        if self.current_time - self.last_conflict_replan_time < 0.2:
+            return False
+
+        self.last_conflict_replan_time = self.current_time
+
+        # A reservation denial may have left a one-second retry backoff in
+        # place. A live conflict is a stronger signal, so bypass that backoff
+        # and attempt the alternate route now.
+        self.reservation_retry_until = self.current_time
+        new_path = self.replan()
+
+        if new_path and self.last_plan_reserved:
+            self.state.status = "MOVING"
+            self.blockage_waiting = 0.0
+            return True
+
+        self.state.status = "WAITING"
+        return False
+

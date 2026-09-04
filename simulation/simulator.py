@@ -1,3 +1,4 @@
+
 from planning.collision import CollisionDetector
 from planning.deadlock import DeadlockDetector
 from communication.message import Message, MessageType
@@ -41,6 +42,7 @@ class Simulator:
         # from being reported as three different deadlocks.
         self._counted_deadlock_cycles = set()
         self._active_collision_pairs = set()
+        self._last_path_conflict_pairs = set()
 
     # ------------------------------------------------------------------
     # MAIN SIMULATION STEP
@@ -156,6 +158,42 @@ class Simulator:
         # false deadlocks and was the main source of the old simulation
         # freezing on shared aisles.
         path_conflicts = self.collision_detector.detect_all_path_conflicts(self.robots)
+
+        # --------------------------------------------------------------
+        # IMMEDIATE CONFLICT RESOLUTION
+        # --------------------------------------------------------------
+        # The old implementation only *displayed* path conflicts here. The
+        # affected robot then waited in handle_conflict(), which could require
+        # dozens of 0.1 s ticks before a useful route change. That is the
+        # 4-5 second "thinking" delay visible in the dashboard.
+        #
+        # Resolve each newly detected pair in the same simulation tick. The
+        # lower-priority robot yields and replans immediately. The reservation
+        # table remains the safety authority, so this does not bypass collision
+        # protection.
+        current_path_conflict_pairs = {
+            tuple(sorted((a.robot_id, b.robot_id)))
+            for a, b in path_conflicts
+        }
+        new_conflict_pairs = current_path_conflict_pairs - self._last_path_conflict_pairs
+
+        for a, b in path_conflicts:
+            if tuple(sorted((a.robot_id, b.robot_id))) not in new_conflict_pairs:
+                continue
+            candidates = [r for r in (a, b) if r.is_online() and r.state.current_task_id is not None]
+            if not candidates:
+                continue
+            yielding_robot = min(
+                candidates,
+                key=lambda r: (r.calculate_priority(), r.robot_id),
+            )
+            before_replans = getattr(yielding_robot, "replan_count", 0)
+            yielding_robot.handle_conflict(self.dt)
+            replans_added = getattr(yielding_robot, "replan_count", 0) - before_replans
+            if replans_added > 0:
+                self.metrics.replanning_count += replans_added
+
+        self._last_path_conflict_pairs = current_path_conflict_pairs
 
         # --------------------------------------------------------------
         # TASK COMPLETION
@@ -348,6 +386,7 @@ class Simulator:
             robot.waiting_time = 0.0
             robot.blockage_waiting = 0.0
             robot.replan_count = 0
+            robot.last_conflict_replan_time = -1_000_000.0
             robot.pending_reservations.clear()
             robot.reservation_leases.clear()
             robot.last_plan_reserved = False
