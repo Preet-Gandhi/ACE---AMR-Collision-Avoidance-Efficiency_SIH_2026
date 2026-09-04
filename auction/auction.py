@@ -1,0 +1,33 @@
+from communication.message import Message, MessageType
+
+
+class Auction:
+    def __init__(self, network, robots):
+        self.network, self.robots, self.bids = network, list(robots), {}
+
+    def announce_task(self, task):
+        task.status = "AUCTIONING"
+        self.network.broadcast(-1, Message(-1, MessageType.TASK_AVAILABLE, task.created_time, {"task_id": task.task_id}))
+
+    def submit_bid(self, bid): self.bids.setdefault(bid.task_id, []).append(bid)
+    def collect_bids(self, task): return self.bids.get(task.task_id, [])
+
+    def select_winner(self, bids):
+        ids = {r.robot_id for r in self.robots}
+        valid = [b for b in bids if b.robot_id in ids]
+        return min(valid, key=lambda b: (b.total_cost, b.robot_id)) if valid else None
+
+    def broadcast_winner(self, task, robot_id):
+        task.assign(robot_id)
+        robot = next((r for r in self.robots if r.robot_id == robot_id), None)
+        if robot and task.task_id not in robot.tasks:
+            robot.accept_task(task)
+        self.network.broadcast(-1, Message(-1, MessageType.TASK_ASSIGNED, task.created_time, {"task_id": task.task_id, "robot_id": robot_id}))
+
+    def run_auction(self, task):
+        self.announce_task(task)
+        bids = [r.calculate_bid(task) for r in self.robots if r.can_bid(task)]
+        self.bids[task.task_id] = bids
+        winner = self.select_winner(bids)
+        if winner: self.broadcast_winner(task, winner.robot_id)
+        return winner
