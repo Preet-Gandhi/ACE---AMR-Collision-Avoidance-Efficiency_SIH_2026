@@ -36,6 +36,10 @@ class SvgWarehouseRenderer:
             "WAITING": "#f59e0b",   # 🟡 Yellow
             "CONFLICT": "#ef4444",  # 🔴 Red
             "IDLE": "#94a3b8",      # ⚪ Gray
+            "DISCHARGED": "#dc2626",
+            "OFFLINE": "#7f1d1d",
+            "CHARGING": "#2563eb",
+            "GOING_TO_CHARGER": "#f59e0b",
         }
 
         # Segregate shelves and custom obstacles
@@ -260,7 +264,8 @@ class SvgWarehouseRenderer:
         # discrete simulation frames, so the visual must always match state.
         for r in snapshot.robots:
             r_id = f"R{r.robot_id}" if r.robot_id is not None else "R?"
-            st = r.status.upper() if r.status else "UNKNOWN"
+            st = (r.availability_state if r.availability_state not in {"", "UNKNOWN"}
+                  else r.status).upper()
             is_conflicted = str(r.robot_id) in conflicted_robots or r.position in conflict_cells
 
             if is_conflicted:
@@ -270,7 +275,7 @@ class SvgWarehouseRenderer:
             elif st == "MOVING":
                 state_color = ROBOT_COLORS["MOVING"]
             else:
-                state_color = ROBOT_COLORS["IDLE"]
+                state_color = ROBOT_COLORS.get(st, ROBOT_COLORS["IDLE"])
 
             cx = padding + r.position[0] * cell_size + cell_size / 2
             cy = padding + r.position[1] * cell_size + cell_size / 2

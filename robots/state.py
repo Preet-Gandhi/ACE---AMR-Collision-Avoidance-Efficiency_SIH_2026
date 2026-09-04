@@ -12,6 +12,10 @@ class RobotState:
 
     battery: float = 100.0
 
+    online: bool = True
+
+    availability_state: str = "ONLINE"
+
     current_task_id: Optional[int] = None
 
     path: list[tuple[int, int]] = field(
@@ -42,7 +46,10 @@ class RobotState:
 
     def clear_task(self):
         self.current_task_id = None
-        self.status = "IDLE"
+        if self.online:
+            self.status = "IDLE"
+        else:
+            self.status = self.availability_state if self.availability_state != "ONLINE" else "OFFLINE"
 
     def set_path(self, path):
         self.path = list(path)

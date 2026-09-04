@@ -9,6 +9,10 @@ class Config:
     simulation_dt: float = 0.1
     robot_speed: float = 1.0
     initial_battery: float = 100.0
+    battery_consumption_per_move: float = 1.0
+    offline_battery_cutoff: float = 0.0
+    charging_rate_per_step: float = 1.0
+    workload_penalty: float = 5.0
     reservation_horizon: int = 20
     deadlock_timeout: float = 5.0
     collision_distance: float = 0.0
@@ -18,7 +22,6 @@ class Config:
     obstacle_sensor_radius: int = 2
     obstacle_safety_radius: int = 0
     random_seed: int = 42
-    robot_speed: float = 1.0
     congestion_penalty: float = 2.0
     priority_bonus: float = 1.0
     invalid_bid_penalty: float = 1_000_000.0

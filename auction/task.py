@@ -22,6 +22,8 @@ class Task:
     deadline: Optional[float] = None
     status: TaskStatus = TaskStatus.PENDING
     assigned_robot_id: Optional[int] = None
+    package_picked_up: bool = False
+    package_position: Optional[tuple[int, int]] = None
 
     def assign(self, robot_id: int) -> None:
         if self.assigned_robot_id == robot_id and self.status in (TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS):
