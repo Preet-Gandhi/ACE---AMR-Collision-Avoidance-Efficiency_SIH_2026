@@ -1,4 +1,4 @@
-from .auction import Auction
+from .auction import Auction, AuctionResult
 from .bid import Bid
 from .task import Task, TaskStatus
 
